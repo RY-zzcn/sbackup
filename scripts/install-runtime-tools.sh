@@ -40,7 +40,9 @@ if [[ $mode != check && $(id -u) -ne 0 ]]; then
   exit 1
 fi
 
-for tool in curl sha256sum bzip2 unzip sed awk sort install; do
+required_tools=(curl sha256sum bzip2 sed awk sort install)
+$install_rclone && required_tools+=(unzip)
+for tool in "${required_tools[@]}"; do
   command -v "$tool" >/dev/null 2>&1 || {
     echo "缺少基础命令 $tool；请先运行 scripts/install.sh，或通过系统包管理器安装 curl、bzip2、unzip 和 coreutils" >&2
     exit 1

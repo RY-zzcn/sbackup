@@ -57,7 +57,7 @@ hex(HMAC-SHA256(SHA256(trim(node_secret)), canonical_string))
     "id": "node_0198example",
     "name": "server-a",
     "display_name": "上海家庭服务器",
-    "client_version": "0.1.0",
+    "client_version": "0.2.0",
     "os": "linux",
     "arch": "amd64"
   },
@@ -103,7 +103,7 @@ hex(HMAC-SHA256(SHA256(trim(node_secret)), canonical_string))
   "node": {
     "id": "node_0198example",
     "name": "server-a",
-    "client_version": "0.1.0"
+    "client_version": "0.2.0"
   },
   "heartbeat": {
     "uptime_seconds": 86400,

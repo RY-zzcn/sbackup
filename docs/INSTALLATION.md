@@ -13,23 +13,24 @@
 | 监控配置 | `/etc/sbackup-monitor/environment` |
 | 监控状态 | `/var/lib/sbackup-monitor/state.json` |
 
-## 首次安装
+## 首次安装（推荐二进制方式）
 
 ```bash
-./scripts/preflight.sh --source-build
-sudo ./scripts/install.sh
+curl -fsSL https://raw.githubusercontent.com/RY-zzcn/sbackup/main/scripts/bootstrap.sh \
+  | sudo bash -s --
 ```
 
-数据库工具默认按需安装，以避免在只备份文件的主机上引入无关客户端。需要一次安装全部数据库客户端时使用 `--all-database-tools`。
+默认从 GitHub Releases 下载静态二进制，不在 VPS 安装 Go、Git 或构建链。数据库工具和 rclone 均按需安装，以避免在只备份文件的主机上引入无关组件。WebDAV 使用 `--with-webdav`，需要一次安装全部数据库客户端时使用 `--all-database-tools`。
 
-安装器支持 apt、dnf、yum、zypper、pacman 和 apk。Go、Restic、rclone 的官方包均在安装前进行 SHA256 校验。
+安装器支持 apt、dnf、yum、zypper、pacman 和 apk。SBackup Release、Restic、rclone 下载物均在安装前进行 SHA256 校验。
 
 ## 升级
 
-拉取新版本后再次执行：
+再次执行 bootstrap 即可升级：
 
 ```bash
-sudo ./scripts/install.sh
+curl -fsSL https://raw.githubusercontent.com/RY-zzcn/sbackup/main/scripts/bootstrap.sh \
+  | sudo bash -s --
 ```
 
 升级只替换程序和项目提供的 systemd 单元，不覆盖已有配置、密钥和状态。升级前仍建议备份 `/etc/sbackup` 和 `/var/lib/sbackup`。
@@ -37,8 +38,8 @@ sudo ./scripts/install.sh
 ## Runtime 更新
 
 ```bash
-./scripts/install-runtime-tools.sh --check
-sudo ./scripts/install-runtime-tools.sh --update
+sudo /usr/local/share/sbackup/scripts/install-runtime-tools.sh --check
+sudo /usr/local/share/sbackup/scripts/install-runtime-tools.sh --update
 ```
 
 可使用 `--restic-only`、`--rclone-only` 或 `--force`。下载物只存在于安全临时目录，结束后自动清理。
@@ -71,7 +72,7 @@ restic version
 rclone version
 ```
 
-`doctor` 会检查实际配置引用的数据库命令和所有密钥文件权限。Restic 和 rclone 无论当前是否使用 WebDAV都会检查，确保切换存储时不会突然缺少运行时。
+`doctor` 会检查实际配置引用的数据库命令、Restic 和 WebDAV 所需的 rclone，以及所有密钥文件权限。使用本地、SFTP 或 S3 时不要求安装 rclone。
 
 ## 备份配置与灾难恢复
 
@@ -84,3 +85,14 @@ rclone version
 - 监控节点 secret（启用监控时）
 
 Restic 仓库密码丢失后无法恢复仓库数据。状态数据库可以重建，但会丢失客户端运行历史和未发送 outbox。
+
+## 仓库密码初始化
+
+每个仓库独立设置密码：
+
+```bash
+sbackup storage password local-usb --generate
+sbackup storage init local-usb
+```
+
+随机密码只显示一次，并保存到配置中 `password_file` 指向的 `0600` 文件。必须离线保存。也可以直接交互执行 `sbackup storage init local-usb`，选择自定义密码或自动生成。

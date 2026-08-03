@@ -1,6 +1,6 @@
 services:
   sbackup-monitor:
-    image: sbackup-monitor:latest
+    image: ghcr.io/ry-zzcn/sbackup-monitor:latest
     restart: unless-stopped
     command: ["--listen", "0.0.0.0:8788"]
     environment:

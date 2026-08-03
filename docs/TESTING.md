@@ -13,6 +13,7 @@ bash -n scripts/*.sh
 - YAML 配置校验、原子保存和 round-trip；
 - SQLite 状态和 outbox 持久化；
 - Restic JSON 摘要解析；
+- Restic 随机/自定义密码文件创建、权限及拒绝覆盖；
 - fake Restic 备份、快照、恢复、验证和保留策略；
 - 真实 Restic 本地仓库初始化、两次增量备份、恢复旧快照和哈希校验；
 - 恢复目标与符号链接安全；
@@ -33,6 +34,8 @@ bash -n scripts/*.sh
 8. 扫描仓库确认没有密钥、状态库、日志和构建产物；
 9. 确认 README、配置示例和 CLI 用法一致；
 10. 创建版本 tag 前再次运行 CI 同等命令。
+
+Release tag 会额外构建 amd64、arm64、armv7 静态二进制并发布 SHA256SUMS，同时构建 amd64/arm64 的 GHCR 监控镜像。
 
 ## 外部服务矩阵
 

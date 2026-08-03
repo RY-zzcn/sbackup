@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"flag"
@@ -276,7 +277,7 @@ func jobCmd(path string, args []string) {
 }
 func storageCmd(path string, args []string) {
 	if len(args) < 1 {
-		fatal(fmt.Errorf("用法: storage list|test|init [storage-id]"), 2)
+		fatal(fmt.Errorf("用法: storage list|test|init|password [storage-id]"), 2)
 	}
 	c, st, _ := svc(path)
 	defer st.Close()
@@ -300,13 +301,100 @@ func storageCmd(path string, args []string) {
 		}
 		fmt.Println("存储连接正常")
 	case "init":
+		if _, err := os.Stat(x.PasswordFile); os.IsNotExist(err) {
+			if !terminal.IsTerminal(os.Stdin.Fd()) {
+				fatal(fmt.Errorf("仓库密码尚未创建；请先运行 storage password %s --generate，或交互运行 storage init %s", x.ID, x.ID), 2)
+			}
+			if err := interactiveRepositoryPassword(*x, bufio.NewReader(os.Stdin)); err != nil {
+				fatal(err, 1)
+			}
+		}
 		if err := repository.Init(context.Background(), c, *x, nil); err != nil {
 			fatal(err, 3)
 		}
 		fmt.Println("仓库初始化完成")
+	case "password":
+		fs := flag.NewFlagSet("storage password", flag.ExitOnError)
+		generate := fs.Bool("generate", false, "生成随机密码")
+		stdin := fs.Bool("stdin", false, "从标准输入读取自定义密码")
+		_ = fs.Parse(args[2:])
+		if *generate && *stdin {
+			fatal(fmt.Errorf("--generate 与 --stdin 不能同时使用"), 2)
+		}
+		var password string
+		var err error
+		if *stdin {
+			if terminal.IsTerminal(os.Stdin.Fd()) {
+				password, err = terminal.ReadPassword("输入自定义 Restic 密码（至少 16 个字符）: ", nil)
+			} else {
+				password, err = bufio.NewReader(os.Stdin).ReadString('\n')
+				password = strings.TrimSuffix(strings.TrimSuffix(password, "\n"), "\r")
+			}
+		} else if !*generate {
+			if !terminal.IsTerminal(os.Stdin.Fd()) {
+				fatal(fmt.Errorf("非交互模式必须指定 --generate 或 --stdin"), 2)
+			}
+			err = interactiveRepositoryPassword(*x, bufio.NewReader(os.Stdin))
+			if err != nil {
+				fatal(err, 1)
+			}
+			return
+		}
+		if err != nil {
+			fatal(err, 1)
+		}
+		created, generated, err := repository.CreatePasswordFile(x.PasswordFile, password)
+		if err != nil {
+			fatal(err, 1)
+		}
+		showRepositoryPasswordResult(x.PasswordFile, created, generated)
 	default:
 		fatal(fmt.Errorf("未知 storage 子命令"), 2)
 	}
+}
+
+func interactiveRepositoryPassword(storage config.Storage, reader *bufio.Reader) error {
+	fmt.Printf("\n为仓库 %s 配置 Restic 加密密码。\n", storage.Name)
+	fmt.Println("1. 自动生成 256 位随机密码（推荐）")
+	fmt.Println("2. 输入自定义密码")
+	fmt.Print("请选择 [1]: ")
+	choice, _ := reader.ReadString('\n')
+	choice = strings.TrimSpace(choice)
+	var password string
+	if choice == "2" {
+		first, err := terminal.ReadPassword("输入密码（至少 16 个字符）: ", reader)
+		if err != nil {
+			return err
+		}
+		second, err := terminal.ReadPassword("再次输入密码: ", reader)
+		if err != nil {
+			return err
+		}
+		if first != second {
+			return fmt.Errorf("两次输入的密码不一致")
+		}
+		password = first
+	} else if choice != "" && choice != "1" {
+		return fmt.Errorf("无效选择")
+	}
+	created, generated, err := repository.CreatePasswordFile(storage.PasswordFile, password)
+	if err != nil {
+		return err
+	}
+	showRepositoryPasswordResult(storage.PasswordFile, created, generated)
+	return nil
+}
+
+func showRepositoryPasswordResult(path, password string, generated bool) {
+	fmt.Println("\nRestic 仓库密码已安全写入:", path)
+	if generated {
+		fmt.Println("随机密码（仅本次显示）:")
+		fmt.Println(password)
+	} else {
+		fmt.Println("自定义密码已保存，程序不会再次显示。")
+	}
+	fmt.Println("重要：请立即把此密码离线保存到密码管理器、加密 U 盘或纸质应急记录。")
+	fmt.Println("丢失密码后，任何人（包括 SBackup 作者）都无法恢复仓库数据。")
 }
 func snapshotCmd(path string, args []string) {
 	subcommand := "list"
@@ -589,7 +677,12 @@ func doctorCmd(path string) {
 	}
 	fmt.Println("配置有效")
 	failed := false
-	required := []string{c.Tools.ResticPath, c.Tools.RclonePath}
+	required := []string{c.Tools.ResticPath}
+	for _, storage := range c.Storages {
+		if storage.Type == "webdav" {
+			required = append(required, c.Tools.RclonePath)
+		}
+	}
 	for _, d := range c.Databases {
 		switch d.Type {
 		case "sqlite":

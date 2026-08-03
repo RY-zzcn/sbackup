@@ -2,6 +2,8 @@ package repository
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -91,6 +93,57 @@ func Build(c *config.Config, s config.Storage) (Runtime, error) {
 
 func ResticBase(rt Runtime) []string {
 	return []string{"-r", rt.Repository, "--password-file", rt.PasswordFile}
+}
+
+// CreatePasswordFile creates a Restic password file without overwriting an
+// existing secret. An empty password generates a random 256-bit secret.
+func CreatePasswordFile(path, password string) (string, bool, error) {
+	if path == "" {
+		return "", false, fmt.Errorf("密码文件路径不能为空")
+	}
+	generated := password == ""
+	if generated {
+		buf := make([]byte, 32)
+		if _, err := rand.Read(buf); err != nil {
+			return "", false, fmt.Errorf("生成随机密码: %w", err)
+		}
+		password = base64.RawURLEncoding.EncodeToString(buf)
+	}
+	password = strings.TrimSuffix(strings.TrimSuffix(password, "\n"), "\r")
+	if len(password) < 16 {
+		return "", false, fmt.Errorf("Restic 密码至少需要 16 个字符")
+	}
+	if strings.ContainsAny(password, "\r\n") {
+		return "", false, fmt.Errorf("Restic 密码不能包含换行")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return "", false, err
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		if os.IsExist(err) {
+			return "", false, fmt.Errorf("密码文件已存在，拒绝覆盖: %s", path)
+		}
+		return "", false, err
+	}
+	removeOnError := true
+	defer func() {
+		_ = f.Close()
+		if removeOnError {
+			_ = os.Remove(path)
+		}
+	}()
+	if _, err := f.WriteString(password + "\n"); err != nil {
+		return "", false, err
+	}
+	if err := f.Sync(); err != nil {
+		return "", false, err
+	}
+	if err := f.Close(); err != nil {
+		return "", false, err
+	}
+	removeOnError = false
+	return password, generated, nil
 }
 func Test(ctx context.Context, c *config.Config, s config.Storage, logger *executor.Logger) error {
 	rt, err := Build(c, s)

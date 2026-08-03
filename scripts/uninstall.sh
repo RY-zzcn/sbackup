@@ -12,6 +12,7 @@ if command -v systemctl >/dev/null 2>&1; then
 fi
 rm -f /etc/systemd/system/sbackup-maintenance.service /etc/systemd/system/sbackup-maintenance.timer /etc/systemd/system/sbackup-monitor.service
 rm -f /usr/local/bin/sbackup /usr/local/bin/sbackup-monitor
+rm -rf /usr/local/share/sbackup
 command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload || true
 
 if $purge; then
