@@ -55,9 +55,7 @@ jobs:
           out="sbackup_${version}_${{ matrix.asset }}"
           mkdir -p "$out"
           CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags="-s -w -X main.version=${version}" -o "$out/sbackup" ./cmd/sbackup
-          CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags="-s -w -X main.version=${version}" -o "$out/sbackup-monitor" ./cmd/sbackup-monitor
-          cp README.md LICENSE VERSION "$out/"
-          cp -r deploy "$out/"
+          cp LICENSE VERSION "$out/"
           (cd "$out" && tar -czf "../$out.tar.gz" .)
       - uses: actions/upload-artifact@v4
         with:

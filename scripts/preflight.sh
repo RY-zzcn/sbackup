@@ -2,9 +2,7 @@
 set -uo pipefail
 
 source_build=false
-all_database_tools=false
 config_path=""
-with_webdav=false
 
 if [[ -x /usr/local/go/bin/go ]]; then
   export PATH=/usr/local/go/bin:$PATH
@@ -16,8 +14,6 @@ usage() {
 
 选项:
   --source-build          同时检查从源码构建所需的 Go 工具链
-  --all-database-tools    检查 PostgreSQL、MySQL/MariaDB 和 SQLite 客户端
-  --with-webdav           同时检查 rclone 和 WebDAV 解压依赖
   --config PATH           若 sbackup 已安装，额外对指定配置执行 doctor
   -h, --help              显示帮助
 EOF
@@ -26,8 +22,6 @@ EOF
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --source-build) source_build=true ;;
-    --all-database-tools) all_database_tools=true ;;
-    --with-webdav) with_webdav=true ;;
     --config)
       [[ $# -ge 2 ]] || { echo "--config 缺少路径" >&2; exit 2; }
       config_path=$2
@@ -71,7 +65,6 @@ else
 fi
 
 base_commands=(curl sha256sum bzip2 tar install)
-$with_webdav && base_commands+=(unzip)
 for command_name in "${base_commands[@]}"; do
   if command -v "$command_name" >/dev/null 2>&1; then
     ok "基础命令: $command_name"
@@ -81,7 +74,6 @@ for command_name in "${base_commands[@]}"; do
 done
 
 runtime_tools=(restic)
-$with_webdav && runtime_tools+=(rclone)
 for runtime in "${runtime_tools[@]}"; do
   if resolved=$(command -v "$runtime" 2>/dev/null); then
     version=$($runtime version 2>&1 | sed -n '1p')
@@ -104,16 +96,6 @@ if $source_build; then
     fail "缺少 Go 工具链（源码构建需要 Go 1.23+）"
   fi
   command -v git >/dev/null 2>&1 && ok "源码工具: git" || fail "缺少源码工具: git"
-fi
-
-if $all_database_tools; then
-  for database_tool in pg_dump mysqldump sqlite3; do
-    command -v "$database_tool" >/dev/null 2>&1 && ok "数据库工具: $database_tool" || fail "缺少数据库工具: $database_tool"
-  done
-else
-  for database_tool in pg_dump mysqldump sqlite3; do
-    command -v "$database_tool" >/dev/null 2>&1 || warn "可选数据库工具未安装: $database_tool"
-  done
 fi
 
 if command -v systemctl >/dev/null 2>&1; then

@@ -52,3 +52,11 @@ func TestValidateReadSubset(t *testing.T) {
 		}
 	}
 }
+
+func TestValidateMonitoringDurations(t *testing.T) {
+	c := validConfig(t)
+	c.Monitoring = Monitoring{Enabled: true, Endpoint: "https://monitor.example/api/v1/report", NodeID: "node", KeyFile: "/tmp/key", KeyVersion: 1, RequestTimeout: "bad", EventRetention: "30d"}
+	if err := c.Validate(); err == nil {
+		t.Fatal("invalid monitoring duration accepted")
+	}
+}

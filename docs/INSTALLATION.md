@@ -5,13 +5,10 @@
 | 内容 | 路径 |
 |---|---|
 | 客户端 | `/usr/local/bin/sbackup` |
-| 监控端 | `/usr/local/bin/sbackup-monitor` |
 | 客户端配置 | `/etc/sbackup/config.yaml` |
 | 客户端密钥 | `/etc/sbackup/secrets/` |
 | 客户端状态 | `/var/lib/sbackup/` |
 | 客户端日志 | `/var/log/sbackup/` |
-| 监控配置 | `/etc/sbackup-monitor/environment` |
-| 监控状态 | `/var/lib/sbackup-monitor/state.json` |
 
 ## 首次安装（推荐二进制方式）
 
@@ -20,9 +17,9 @@ curl -fsSL https://raw.githubusercontent.com/RY-zzcn/sbackup/main/scripts/bootst
   | sudo bash -s --
 ```
 
-默认从 GitHub Releases 下载静态二进制，不在 VPS 安装 Go、Git 或构建链。数据库工具和 rclone 均按需安装，以避免在只备份文件的主机上引入无关组件。WebDAV 使用 `--with-webdav`，需要一次安装全部数据库客户端时使用 `--all-database-tools`。
+默认从 GitHub Releases 下载静态客户端，不在 VPS 安装 Go、Git 或构建链。rclone 在菜单首次配置 WebDAV 时自动安装，数据库工具按任务实际引用按需准备。
 
-安装器支持 apt、dnf、yum、zypper、pacman 和 apk。SBackup Release、Restic、rclone 下载物均在安装前进行 SHA256 校验。
+安装器支持 apt、dnf、yum、zypper、pacman 和 apk。SBackup Release、Restic、rclone 下载物均在安装前进行 SHA256 校验。监控端独立通过 Docker/GHCR 部署，不进入普通客户端安装流程。
 
 ## 升级
 
@@ -38,11 +35,11 @@ curl -fsSL https://raw.githubusercontent.com/RY-zzcn/sbackup/main/scripts/bootst
 ## Runtime 更新
 
 ```bash
-sudo /usr/local/share/sbackup/scripts/install-runtime-tools.sh --check
-sudo /usr/local/share/sbackup/scripts/install-runtime-tools.sh --update
+sudo /usr/local/share/sbackup/scripts/install-runtime-tools.sh --restic-only --check
+sudo /usr/local/share/sbackup/scripts/install-runtime-tools.sh --restic-only --update
 ```
 
-可使用 `--restic-only`、`--rclone-only` 或 `--force`。下载物只存在于安全临时目录，结束后自动清理。
+只有配置 WebDAV 时才使用 `--rclone-only`；下载物只存在于安全临时目录，结束后自动清理。
 
 ## systemd
 

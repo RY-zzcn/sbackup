@@ -25,7 +25,7 @@ bash -n scripts/*.sh
 ## 手工发布检查
 
 1. 执行 `scripts/preflight.sh --source-build`；
-2. 执行 `scripts/install-runtime-tools.sh --check`；
+2. 执行 `scripts/install-runtime-tools.sh --check --restic-only`；
 3. 在临时系统路径执行完整安装或升级；
 4. 运行 `sbackup version`、`config validate` 和 `doctor`；
 5. 创建临时本地仓库并完成备份、恢复、`standard` check；

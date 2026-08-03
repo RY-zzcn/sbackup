@@ -43,10 +43,18 @@ fi
 required_tools=(curl sha256sum bzip2 sed awk sort install)
 $install_rclone && required_tools+=(unzip)
 for tool in "${required_tools[@]}"; do
-  command -v "$tool" >/dev/null 2>&1 || {
-    echo "缺少基础命令 $tool；请先运行 scripts/install.sh，或通过系统包管理器安装 curl、bzip2、unzip 和 coreutils" >&2
-    exit 1
-  }
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    if [[ $tool == unzip && $mode == update && $(id -u) -eq 0 ]]; then
+      if command -v apt-get >/dev/null 2>&1; then apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends unzip
+      elif command -v dnf >/dev/null 2>&1; then dnf install -y unzip
+      elif command -v yum >/dev/null 2>&1; then yum install -y unzip
+      elif command -v zypper >/dev/null 2>&1; then zypper --non-interactive install unzip
+      elif command -v pacman >/dev/null 2>&1; then pacman -Sy --needed --noconfirm unzip
+      elif command -v apk >/dev/null 2>&1; then apk add --no-cache unzip
+      fi
+    fi
+    command -v "$tool" >/dev/null 2>&1 || { echo "缺少基础命令 $tool" >&2; exit 1; }
+  fi
 done
 
 case "$(uname -m)" in

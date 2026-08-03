@@ -415,11 +415,36 @@ func (c *Config) Validate() error {
 		if !strings.HasSuffix(u.Path, "/api/v1/report") {
 			return errors.New("监控 endpoint 必须以 /api/v1/report 结尾")
 		}
+		if c.Monitoring.RequestTimeout != "" {
+			if _, err := time.ParseDuration(c.Monitoring.RequestTimeout); err != nil {
+				return errors.New("request_timeout 无效")
+			}
+		}
+		if c.Monitoring.EventRetention != "" {
+			if _, err := ParseDuration(c.Monitoring.EventRetention); err != nil {
+				return errors.New("event_retention 无效")
+			}
+		}
+		if c.Monitoring.KeyVersion < 1 {
+			return errors.New("key_version 必须大于 0")
+		}
 		if _, err := time.ParseDuration(c.Monitoring.HeartbeatInterval); c.Monitoring.HeartbeatEnabled && err != nil {
 			return errors.New("heartbeat_interval 无效")
 		}
 	}
 	return nil
+}
+
+// ParseDuration accepts Go durations plus whole-day values such as "30d".
+func ParseDuration(value string) (time.Duration, error) {
+	if strings.HasSuffix(value, "d") {
+		days, err := strconv.Atoi(strings.TrimSuffix(value, "d"))
+		if err != nil || days < 0 {
+			return 0, fmt.Errorf("无效天数 %q", value)
+		}
+		return time.Duration(days) * 24 * time.Hour, nil
+	}
+	return time.ParseDuration(value)
 }
 
 func validateReadSubset(value string) error {

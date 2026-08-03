@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	runtimeutil "sbackup/internal/runtime"
 	"strings"
 
 	"sbackup/internal/config"
@@ -40,7 +41,7 @@ func Build(c *config.Config, s config.Storage) (Runtime, error) {
 		if conf == "" {
 			conf = "/etc/sbackup/rclone.conf"
 		}
-		r.Env = append(r.Env, "RCLONE_CONFIG="+conf, "RCLONE_CONFIG_PASS=")
+		r.Env = append(r.Env, "RCLONE_CONFIG="+conf)
 		if s.WebDAV.Transfers > 0 {
 			r.Env = append(r.Env, fmt.Sprintf("RCLONE_TRANSFERS=%d", s.WebDAV.Transfers))
 		}
@@ -146,6 +147,11 @@ func CreatePasswordFile(path, password string) (string, bool, error) {
 	return password, generated, nil
 }
 func Test(ctx context.Context, c *config.Config, s config.Storage, logger *executor.Logger) error {
+	if s.Type == "webdav" {
+		if err := runtimeutil.Ensure(c.Tools.RclonePath); err != nil {
+			return err
+		}
+	}
 	rt, err := Build(c, s)
 	if err != nil {
 		return err
@@ -157,6 +163,11 @@ func Test(ctx context.Context, c *config.Config, s config.Storage, logger *execu
 	return nil
 }
 func Init(ctx context.Context, c *config.Config, s config.Storage, logger *executor.Logger) error {
+	if s.Type == "webdav" {
+		if err := runtimeutil.Ensure(c.Tools.RclonePath); err != nil {
+			return err
+		}
+	}
 	rt, err := Build(c, s)
 	if err != nil {
 		return err

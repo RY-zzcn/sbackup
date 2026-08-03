@@ -15,6 +15,7 @@ import (
 	"sbackup/internal/executor"
 	"sbackup/internal/lock"
 	"sbackup/internal/repository"
+	runtimeutil "sbackup/internal/runtime"
 	"sbackup/internal/store"
 )
 
@@ -125,6 +126,11 @@ func (s *Service) Run(ctx context.Context, jobID string, scheduled bool) (store.
 	storageCfg, ok := s.Config.Storage(j.StorageID)
 	if !ok {
 		return fail("CONFIG_ERROR", fmt.Errorf("存储不存在"))
+	}
+	if storageCfg.Type == "webdav" {
+		if err := runtimeutil.Ensure(s.Config.Tools.RclonePath); err != nil {
+			return fail("MISSING_RUNTIME", err)
+		}
 	}
 	rt, err := repository.Build(s.Config, *storageCfg)
 	if err != nil {
@@ -250,6 +256,11 @@ func (s *Service) runtime(jobID string) (*config.Job, repository.Runtime, error)
 	st, ok := s.Config.Storage(j.StorageID)
 	if !ok {
 		return nil, repository.Runtime{}, fmt.Errorf("存储不存在")
+	}
+	if st.Type == "webdav" {
+		if err := runtimeutil.Ensure(s.Config.Tools.RclonePath); err != nil {
+			return nil, repository.Runtime{}, err
+		}
 	}
 	rt, err := repository.Build(s.Config, *st)
 	return j, rt, err

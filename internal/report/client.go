@@ -105,6 +105,15 @@ func (c *Client) Send(ctx context.Context, e reportprotocol.Event) error {
 	}
 	return nil
 }
+
+// Test sends one heartbeat even while monitoring is not yet enabled. This is
+// used by the setup wizard to validate credentials before saving the setting.
+func (c *Client) Test(ctx context.Context) error {
+	wasEnabled := c.Config.Monitoring.Enabled
+	c.Config.Monitoring.Enabled = true
+	defer func() { c.Config.Monitoring.Enabled = wasEnabled }()
+	return c.Send(ctx, c.Heartbeat())
+}
 func (c *Client) SendOrQueue(ctx context.Context, e reportprotocol.Event) {
 	if err := c.Send(ctx, e); err != nil {
 		_, _ = c.Store.Enqueue("report", c.Config.Monitoring.Endpoint, e)

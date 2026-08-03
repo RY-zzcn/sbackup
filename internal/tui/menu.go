@@ -5,10 +5,15 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sbackup/internal/backup"
 	"sbackup/internal/config"
+	"sbackup/internal/report"
 	"sbackup/internal/repository"
+	runtimeutil "sbackup/internal/runtime"
+	"sbackup/internal/schedule"
+	"sbackup/internal/store"
 	"sbackup/internal/terminal"
 	"sort"
 	"strconv"
@@ -19,54 +24,36 @@ import (
 func Run(c *config.Config, path string, save func() error) error {
 	in := bufio.NewReader(os.Stdin)
 	for {
-		fmt.Println("\nSBackup")
-		fmt.Println("1. 查看配置摘要")
-		fmt.Println("2. 查看和恢复备份")
-		fmt.Println("3. 管理任务")
-		fmt.Println("4. 管理存储")
-		fmt.Println("5. 初始化仓库和密码")
-		fmt.Println("6. 添加本地存储")
-		fmt.Println("7. 添加 WebDAV 存储")
-		fmt.Println("8. 添加目录备份任务")
-		fmt.Println("9. 管理监控上报")
-		fmt.Println("10. 校验配置")
+		fmt.Println("\nSBackup - 轻量备份")
+		fmt.Println("1. 快速设置备份")
+		fmt.Println("2. 立即运行备份")
+		fmt.Println("3. 查看和恢复备份")
+		fmt.Println("4. 查看状态")
+		fmt.Println("5. 连接监控端")
+		fmt.Println("6. 高级管理")
 		fmt.Println("0. 退出")
 		fmt.Print("请选择: ")
 		line, err := in.ReadString('\n')
 		if err != nil && line == "" {
 			return nil
 		}
-		changed := true
+		changed := false
 		switch strings.TrimSpace(line) {
 		case "1":
-			show(c)
-			changed = false
+			quickSetup(c, path, in, save)
 		case "2":
-			restoreWizard(c, in)
+			runBackup(c, in)
 			changed = false
 		case "3":
-			changed = jobs(c, in)
+			restoreWizard(c, in)
+			changed = false
 		case "4":
-			storages(c, in)
+			show(c)
 			changed = false
 		case "5":
-			initializeRepository(c, in)
-			changed = false
-		case "6":
-			changed = addLocalStorage(c, in)
-		case "7":
-			changed = addWebDAV(c, in)
-		case "8":
-			changed = addJob(c, in)
-		case "9":
 			changed = monitor(c, in)
-		case "10":
-			if err := c.Validate(); err != nil {
-				fmt.Println("配置错误:", err)
-			} else {
-				fmt.Println("配置有效")
-			}
-			changed = false
+		case "6":
+			changed = advancedMenu(c, path, in, save)
 		case "0", "":
 			return nil
 		default:
@@ -99,6 +86,294 @@ func selectJob(c *config.Config, in *bufio.Reader) (*config.Job, bool) {
 		return nil, false
 	}
 	return &c.Jobs[n-1], true
+}
+
+func quickSetup(c *config.Config, configPath string, in *bufio.Reader, save func() error) {
+	fmt.Println("\n快速设置会依次完成：存储、加密密码、仓库初始化、备份目录和每天自动备份。")
+	fmt.Println("1. 本机或挂载磁盘（最简单）")
+	fmt.Println("2. WebDAV 网盘")
+	fmt.Print("请选择，直接回车返回: ")
+	choice, _ := in.ReadString('\n')
+	choice = strings.TrimSpace(choice)
+	var storage config.Storage
+	var ok bool
+	switch choice {
+	case "1":
+		storage, ok = newLocalStorage(c, in)
+	case "2":
+		storage, ok = newWebDAVStorage(c, in)
+	default:
+		return
+	}
+	if !ok {
+		return
+	}
+	if _, exists := c.Storage(storage.ID); exists {
+		fmt.Println("存储 ID 已存在。")
+		return
+	}
+	if err := validateNewStorage(c, storage); err != nil {
+		fmt.Println("存储配置无效:", err)
+		return
+	}
+	c.Storages = append(c.Storages, storage)
+	if err := save(); err != nil {
+		c.Storages = c.Storages[:len(c.Storages)-1]
+		fmt.Println("保存存储失败:", err)
+		return
+	}
+	if err := createRepositoryPassword(storage, in); err != nil {
+		c.Storages = c.Storages[:len(c.Storages)-1]
+		_ = save()
+		fmt.Println("创建仓库密码失败:", err)
+		return
+	}
+	if err := repository.Init(context.Background(), c, storage, nil); err != nil {
+		fmt.Println("初始化仓库失败:", err)
+		fmt.Println("存储配置和密码已保留，可修正网络或路径后从“高级管理”重新初始化。")
+		return
+	}
+	fmt.Println("仓库初始化完成。")
+	finishJobSetup(c, configPath, storage.ID, in, save)
+}
+
+func finishJobSetup(c *config.Config, configPath, storageID string, in *bufio.Reader, save func() error) {
+	job, ok := newJob(storageID, in)
+	if !ok {
+		fmt.Println("未创建备份任务；仓库配置已保留，可稍后继续设置。")
+		return
+	}
+	if _, exists := c.Job(job.ID); exists {
+		fmt.Println("任务 ID 已存在。")
+		return
+	}
+	if err := validateNewJob(c, job); err != nil {
+		fmt.Println("任务配置无效:", err)
+		return
+	}
+	c.Jobs = append(c.Jobs, job)
+	if err := save(); err != nil {
+		c.Jobs = c.Jobs[:len(c.Jobs)-1]
+		fmt.Println("保存任务失败:", err)
+		return
+	}
+	if job.Schedule.Enabled {
+		if err := installJobSchedule(job, configPath); err != nil {
+			fmt.Println("任务已保存，但自动定时器安装失败:", err)
+		} else {
+			fmt.Println("每天自动备份已启用。")
+		}
+	}
+	fmt.Print("现在立即执行第一次备份吗？[Y/n]: ")
+	answer, _ := in.ReadString('\n')
+	if strings.ToLower(strings.TrimSpace(answer)) != "n" {
+		runOne(c, job.ID)
+	}
+	fmt.Println("快速设置完成。以后直接运行 sudo sbackup 即可备份或恢复。")
+}
+
+func validateNewStorage(c *config.Config, storage config.Storage) error {
+	probe := *c
+	probe.Storages = append(append([]config.Storage{}, c.Storages...), storage)
+	return probe.Validate()
+}
+
+func validateNewJob(c *config.Config, job config.Job) error {
+	probe := *c
+	probe.Jobs = append(append([]config.Job{}, c.Jobs...), job)
+	return probe.Validate()
+}
+
+func newLocalStorage(c *config.Config, in *bufio.Reader) (config.Storage, bool) {
+	id := ask(in, "存储名称（英文小写）", "local")
+	name := ask(in, "显示名称", "本机备份")
+	repo := ask(in, "备份仓库目录", "/var/backups/sbackup/"+c.Global.Hostname)
+	passwordFile := "/etc/sbackup/secrets/repositories/" + id + ".pass"
+	return config.Storage{ID: id, Name: name, Type: "local", RepositoryPath: repo, PasswordFile: passwordFile}, id != ""
+}
+
+func newWebDAVStorage(c *config.Config, in *bufio.Reader) (config.Storage, bool) {
+	if err := runtimeutil.Ensure(c.Tools.RclonePath); err != nil {
+		fmt.Println("无法准备 WebDAV 组件:", err)
+		return config.Storage{}, false
+	}
+	id := ask(in, "存储名称（英文小写）", "webdav")
+	name := ask(in, "显示名称", "WebDAV 备份")
+	endpoint := ask(in, "WebDAV 地址", "")
+	if endpoint == "" {
+		return config.Storage{}, false
+	}
+	username := ask(in, "WebDAV 用户名", "")
+	password, err := terminal.ReadPassword("WebDAV 密码: ", in)
+	if err != nil || password == "" {
+		fmt.Println("读取 WebDAV 密码失败。")
+		return config.Storage{}, false
+	}
+	vendor := ask(in, "服务类型（other/nextcloud/owncloud/sharepoint）", "other")
+	remote := "sbackup-" + id
+	conf := "/etc/sbackup/rclone.conf"
+	root := ask(in, "网盘中的备份目录", "/sbackup/"+c.Global.Hostname)
+	passwordFile := "/etc/sbackup/secrets/repositories/" + id + ".pass"
+	storage := config.Storage{ID: id, Name: name, Type: "webdav", PasswordFile: passwordFile, WebDAV: &config.WebDAVStorage{RemoteName: remote, URL: endpoint, Vendor: vendor, Username: username, RcloneConfig: conf, RemoteRoot: root, VerifyTLS: true, Transfers: 2, Checkers: 4, Timeout: "60s", Retries: 5, RetriesSleep: "10s"}}
+	if err := validateNewStorage(c, storage); err != nil {
+		fmt.Println("WebDAV 配置无效:", err)
+		return config.Storage{}, false
+	}
+	if err := repository.ConfigureWebDAV(c.Tools.RclonePath, conf, remote, endpoint, vendor, username, password); err != nil {
+		fmt.Println("创建 WebDAV 连接失败:", err)
+		return config.Storage{}, false
+	}
+	return storage, true
+}
+
+func createRepositoryPassword(storage config.Storage, in *bufio.Reader) error {
+	fmt.Println("\nRestic 会用密码加密所有备份。")
+	fmt.Println("1. 自动生成随机密码（推荐）")
+	fmt.Println("2. 自定义密码")
+	fmt.Print("请选择 [1]: ")
+	choice, _ := in.ReadString('\n')
+	var password string
+	if strings.TrimSpace(choice) == "2" {
+		first, err := terminal.ReadPassword("输入密码（至少 16 个字符）: ", in)
+		if err != nil {
+			return err
+		}
+		second, err := terminal.ReadPassword("再次输入密码: ", in)
+		if err != nil || first != second {
+			return fmt.Errorf("两次密码不一致")
+		}
+		password = first
+	}
+	created, generated, err := repository.CreatePasswordFile(storage.PasswordFile, password)
+	if err != nil {
+		return err
+	}
+	if generated {
+		fmt.Println("\n随机仓库密码（仅显示一次，请立即离线保存）:")
+		fmt.Println(created)
+	}
+	fmt.Println("密码文件:", storage.PasswordFile)
+	return nil
+}
+
+func newJob(storageID string, in *bufio.Reader) (config.Job, bool) {
+	id := ask(in, "任务名称（英文小写）", "daily")
+	name := ask(in, "显示名称", "每日备份")
+	raw := ask(in, "需要备份的目录，多个用逗号分隔", "/etc,/home")
+	paths := splitValues(raw)
+	if id == "" || len(paths) == 0 {
+		return config.Job{}, false
+	}
+	timeOfDay := ask(in, "每天备份时间（24 小时制）", "02:30")
+	if !validClock(timeOfDay) {
+		fmt.Println("备份时间格式无效，请使用 HH:MM，例如 02:30。")
+		return config.Job{}, false
+	}
+	return config.Job{ID: id, Name: name, Enabled: true, StorageID: storageID, Sources: config.Sources{Paths: paths, StrictPaths: true}, Schedule: config.Schedule{Enabled: true, Type: "calendar", Expression: "*-*-* " + timeOfDay + ":00", Persistent: true, RandomizedDelay: "10m", GracePeriod: "45m", Timeout: "6h"}, Retention: config.Retention{KeepLast: 3, KeepDaily: 14, KeepWeekly: 8, KeepMonthly: 12, KeepYearly: 3, ForgetAfterBackup: true, PruneSchedule: "weekly"}, Verification: config.Verification{MetadataAfterBackup: true, StandardSchedule: "weekly"}, Restic: config.Restic{Compression: "auto"}, Monitoring: config.JobMonitoring{Report: true, Heartbeat: true}}, true
+}
+
+func validClock(value string) bool {
+	if len(value) != 5 || value[2] != ':' {
+		return false
+	}
+	hour, errHour := strconv.Atoi(value[:2])
+	minute, errMinute := strconv.Atoi(value[3:])
+	return errHour == nil && errMinute == nil && hour >= 0 && hour < 24 && minute >= 0 && minute < 60
+}
+
+func installJobSchedule(job config.Job, configPath string) error {
+	if os.Geteuid() != 0 {
+		return fmt.Errorf("启用系统定时器需要 sudo")
+	}
+	bin, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	if err := schedule.Install(job, bin, configPath, "/etc/systemd/system"); err != nil {
+		return err
+	}
+	if _, err := exec.LookPath("systemctl"); err != nil {
+		return fmt.Errorf("系统没有 systemd，请自行设置定时任务")
+	}
+	unit := "sbackup-job-" + job.ID + ".timer"
+	if err := exec.Command("systemctl", "daemon-reload").Run(); err != nil {
+		return err
+	}
+	if output, err := exec.Command("systemctl", "enable", "--now", unit).CombinedOutput(); err != nil {
+		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func runBackup(c *config.Config, in *bufio.Reader) {
+	job, ok := selectJob(c, in)
+	if ok {
+		runOne(c, job.ID)
+	}
+}
+
+func runOne(c *config.Config, jobID string) {
+	st, err := store.Open(c.Global.StateDB)
+	if err != nil {
+		fmt.Println("打开状态库失败:", err)
+		return
+	}
+	defer st.Close()
+	run, err := (&backup.Service{Config: c, Store: st}).Run(context.Background(), jobID, false)
+	if err != nil {
+		fmt.Println("备份失败:", err)
+		return
+	}
+	fmt.Println("备份完成，快照:", run.SnapshotID)
+}
+
+func advancedMenu(c *config.Config, configPath string, in *bufio.Reader, save func() error) bool {
+	fmt.Println("\n高级管理")
+	fmt.Println("1. 管理任务启用状态")
+	fmt.Println("2. 查看存储")
+	fmt.Println("3. 初始化已有仓库")
+	fmt.Println("4. 为已有存储添加备份任务")
+	fmt.Println("5. 校验配置")
+	fmt.Println("0. 返回")
+	fmt.Print("请选择: ")
+	choice, _ := in.ReadString('\n')
+	switch strings.TrimSpace(choice) {
+	case "1":
+		return jobs(c, in)
+	case "2":
+		storages(c, in)
+	case "3":
+		initializeRepository(c, in)
+	case "4":
+		storage, ok := selectStorage(c, in)
+		if ok {
+			finishJobSetup(c, configPath, storage.ID, in, save)
+		}
+	case "5":
+		if err := c.Validate(); err != nil {
+			fmt.Println("配置错误:", err)
+		} else {
+			fmt.Println("配置有效")
+		}
+	}
+	return false
+}
+
+func selectStorage(c *config.Config, in *bufio.Reader) (*config.Storage, bool) {
+	if len(c.Storages) == 0 {
+		fmt.Println("尚未配置存储。")
+		return nil, false
+	}
+	for i := range c.Storages {
+		fmt.Printf("%d. %s (%s)\n", i+1, c.Storages[i].Name, c.Storages[i].ID)
+	}
+	fmt.Print("选择存储，直接回车返回: ")
+	line, _ := in.ReadString('\n')
+	n, err := strconv.Atoi(strings.TrimSpace(line))
+	if err != nil || n < 1 || n > len(c.Storages) {
+		return nil, false
+	}
+	return &c.Storages[n-1], true
 }
 
 func restoreWizard(c *config.Config, in *bufio.Reader) {
@@ -294,18 +569,112 @@ func storages(c *config.Config, in *bufio.Reader) {
 	_, _ = in.ReadString('\n')
 }
 func monitor(c *config.Config, in *bufio.Reader) bool {
-	fmt.Printf("当前监控: %v\n", c.Monitoring.Enabled)
-	fmt.Print("输入 on/off 或回车返回: ")
-	x, _ := in.ReadString('\n')
-	switch strings.TrimSpace(strings.ToLower(x)) {
-	case "on":
-		c.Monitoring.Enabled = true
-		return true
-	case "off":
-		c.Monitoring.Enabled = false
-		return true
+	if c.Monitoring.Enabled {
+		fmt.Println("当前已连接:", c.Monitoring.Endpoint)
+		fmt.Println("1. 测试连接")
+		fmt.Println("2. 重新配置")
+		fmt.Println("3. 关闭监控上报")
+		fmt.Println("0. 返回")
+		fmt.Print("请选择: ")
+		choice, _ := in.ReadString('\n')
+		switch strings.TrimSpace(choice) {
+		case "1":
+			if err := testMonitor(c); err != nil {
+				fmt.Println("连接失败:", err)
+			} else {
+				fmt.Println("监控连接正常。")
+			}
+		case "2":
+			return configureMonitor(c, in)
+		case "3":
+			c.Monitoring.Enabled = false
+			fmt.Println("监控上报已关闭，备份功能不受影响。")
+			return true
+		}
+		return false
 	}
-	return false
+	return configureMonitor(c, in)
+}
+
+func configureMonitor(c *config.Config, in *bufio.Reader) bool {
+	fmt.Println("\n连接监控端只会上报备份状态，不允许远程执行命令。")
+	endpoint := ask(in, "监控地址", "https://monitor.example.com/api/v1/report")
+	if endpoint != "" && !strings.HasSuffix(strings.TrimSuffix(endpoint, "/"), "/api/v1/report") {
+		endpoint = strings.TrimSuffix(endpoint, "/") + "/api/v1/report"
+	}
+	nodeID := ask(in, "节点 ID", c.Global.Hostname)
+	secret, err := terminal.ReadPassword("监控端提供的 node secret: ", in)
+	if err != nil || len(secret) < 32 {
+		fmt.Println("node secret 至少需要 32 个字符。")
+		return false
+	}
+	keyFile := "/etc/sbackup/secrets/monitor.key"
+	oldSecret, oldSecretErr := os.ReadFile(keyFile)
+	if err := writeSecret(keyFile, secret); err != nil {
+		fmt.Println("保存监控密钥失败:", err)
+		return false
+	}
+	old := c.Monitoring
+	c.Monitoring = config.Monitoring{Enabled: true, Endpoint: endpoint, NodeID: nodeID, KeyFile: keyFile, KeyVersion: 1, ReportSystemInfo: true, HeartbeatEnabled: true, HeartbeatInterval: "5m", RequestTimeout: "10s", MaxPendingEvents: 10000, EventRetention: "30d"}
+	if err := c.Validate(); err != nil {
+		c.Monitoring = old
+		restoreSecret(keyFile, oldSecret, oldSecretErr)
+		fmt.Println("监控配置无效:", err)
+		return false
+	}
+	if err := testMonitor(c); err != nil {
+		c.Monitoring = old
+		restoreSecret(keyFile, oldSecret, oldSecretErr)
+		fmt.Println("监控连接测试失败，未启用:", err)
+		return false
+	}
+	fmt.Println("监控端已连接。")
+	return true
+}
+
+func testMonitor(c *config.Config) error {
+	st, err := store.Open(c.Global.StateDB)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	return (&report.Client{Config: c, Store: st, Version: "menu"}).Test(context.Background())
+}
+
+func writeSecret(path, secret string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".secret-*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	defer os.Remove(name)
+	if err := tmp.Chmod(0600); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.WriteString(secret + "\n"); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(name, path)
+}
+
+func restoreSecret(path string, old []byte, oldErr error) {
+	if oldErr == nil {
+		_ = os.WriteFile(path, old, 0600)
+	} else if os.IsNotExist(oldErr) {
+		_ = os.Remove(path)
+	}
 }
 func ask(in *bufio.Reader, label, def string) string {
 	if def != "" {
@@ -320,48 +689,13 @@ func ask(in *bufio.Reader, label, def string) string {
 	}
 	return x
 }
-func addWebDAV(c *config.Config, in *bufio.Reader) bool {
-	id := ask(in, "存储 ID", "")
-	if id == "" {
-		return false
-	}
-	name := ask(in, "显示名称", id)
-	url := ask(in, "WebDAV URL", "")
-	remote := ask(in, "rclone remote 名称", id)
-	root := ask(in, "远程根目录", "/sbackup/"+c.Global.Hostname)
-	repoPass := ask(in, "Restic 密码文件", "/etc/sbackup/secrets/repositories/"+id+".pass")
-	conf := ask(in, "rclone 配置文件", "/etc/sbackup/rclone.conf")
-	c.Storages = append(c.Storages, config.Storage{ID: id, Name: name, Type: "webdav", PasswordFile: repoPass, WebDAV: &config.WebDAVStorage{RemoteName: remote, URL: url, RcloneConfig: conf, RemoteRoot: root, VerifyTLS: true, Transfers: 2, Checkers: 4, Timeout: "60s", Retries: 5, RetriesSleep: "10s"}})
-	return true
-}
 
-func addLocalStorage(c *config.Config, in *bufio.Reader) bool {
-	id := ask(in, "存储 ID（小写字母、数字、横线）", "")
-	if id == "" {
-		return false
-	}
-	name := ask(in, "显示名称", id)
-	repo := ask(in, "Restic 仓库目录", "/var/backups/sbackup/"+c.Global.Hostname+"/"+id)
-	passwordFile := ask(in, "密码文件", "/etc/sbackup/secrets/repositories/"+id+".pass")
-	c.Storages = append(c.Storages, config.Storage{ID: id, Name: name, Type: "local", RepositoryPath: repo, PasswordFile: passwordFile})
-	fmt.Println("存储配置已添加。保存后请从主菜单选择“初始化仓库和密码”。")
-	return true
-}
-func addJob(c *config.Config, in *bufio.Reader) bool {
-	id := ask(in, "任务 ID", "")
-	if id == "" {
-		return false
-	}
-	name := ask(in, "任务名称", id)
-	storage := ask(in, "存储 ID", "")
-	raw := ask(in, "备份目录，逗号分隔", "/etc,/home")
-	calendar := ask(in, "systemd OnCalendar", "*-*-* 02:30:00")
-	paths := []string{}
-	for _, p := range strings.Split(raw, ",") {
-		if p = strings.TrimSpace(p); p != "" {
-			paths = append(paths, p)
+func splitValues(raw string) []string {
+	values := []string{}
+	for _, value := range strings.Split(raw, ",") {
+		if value = strings.TrimSpace(value); value != "" {
+			values = append(values, value)
 		}
 	}
-	c.Jobs = append(c.Jobs, config.Job{ID: id, Name: name, Enabled: true, StorageID: storage, Sources: config.Sources{Paths: paths, StrictPaths: true}, Schedule: config.Schedule{Enabled: true, Type: "calendar", Expression: calendar, Persistent: true, RandomizedDelay: "10m", GracePeriod: "45m", Timeout: "6h"}, Retention: config.Retention{KeepLast: 3, KeepDaily: 14, KeepWeekly: 8, KeepMonthly: 12, KeepYearly: 3, ForgetAfterBackup: true, PruneSchedule: "weekly"}, Verification: config.Verification{MetadataAfterBackup: true, StandardSchedule: "weekly"}, Restic: config.Restic{Compression: "auto"}, Monitoring: config.JobMonitoring{Report: true, Heartbeat: true}})
-	return true
+	return values
 }

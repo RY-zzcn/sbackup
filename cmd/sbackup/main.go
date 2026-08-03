@@ -592,7 +592,7 @@ func monitorCmd(path string, args []string) {
 		}
 	case "test":
 		r := &report.Client{Config: c, Store: st, Version: version}
-		if err := r.Send(context.Background(), r.Heartbeat()); err != nil {
+		if err := r.Test(context.Background()); err != nil {
 			fatal(err, 1)
 		}
 		fmt.Println("监控上报成功")
@@ -666,7 +666,7 @@ func maintenanceCmd(path string) {
 	if c.Monitoring.Enabled && c.Monitoring.HeartbeatEnabled {
 		rep.SendOrQueue(context.Background(), rep.Heartbeat())
 	}
-	retention, _ := time.ParseDuration(c.Monitoring.EventRetention)
+	retention, _ := config.ParseDuration(c.Monitoring.EventRetention)
 	_ = st.Prune(10000, c.Monitoring.MaxPendingEvents, retention)
 	fmt.Printf("处理 %d 个待发送事件\n", len(items))
 }
@@ -696,7 +696,11 @@ func doctorCmd(path string) {
 	for _, p := range unique(required) {
 		resolved, err := exec.LookPath(p)
 		if err != nil {
-			fmt.Printf("缺少运行时命令 %s（请运行 scripts/install-runtime-tools.sh 安装官方最新版）\n", p)
+			if filepath.Base(p) == "rclone" {
+				fmt.Printf("缺少 rclone；返回 SBackup 菜单选择 WebDAV 会自动安装\n")
+			} else {
+				fmt.Printf("缺少运行时命令 %s（请运行 /usr/local/share/sbackup/scripts/install-runtime-tools.sh）\n", p)
+			}
 			failed = true
 			continue
 		}
