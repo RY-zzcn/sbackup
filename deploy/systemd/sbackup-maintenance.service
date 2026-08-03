@@ -1,0 +1,6 @@
+[Unit]
+Description=SBackup maintenance
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/sbackup maintenance

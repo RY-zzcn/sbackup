@@ -1,0 +1,12 @@
+services:
+  sbackup-monitor:
+    image: sbackup-monitor:latest
+    restart: unless-stopped
+    command: ["--listen", "0.0.0.0:8788"]
+    environment:
+      SBACKUP_MONITOR_USER: ${SBACKUP_MONITOR_USER:?required}
+      SBACKUP_MONITOR_PASSWORD: ${SBACKUP_MONITOR_PASSWORD:?required}
+    ports:
+      - "127.0.0.1:8788:8788"
+    volumes:
+      - ./data:/var/lib/sbackup-monitor
