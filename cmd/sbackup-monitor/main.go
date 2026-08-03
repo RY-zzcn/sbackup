@@ -27,7 +27,11 @@ func main() {
 		fmt.Println("sbackup-monitor", version)
 		return
 	}
-	s := monitor.New(monitor.Config{Listen: *listen, DataFile: *data, AdminUsername: *adminUser, AdminPassword: *adminPass})
+	s, err := monitor.New(monitor.Config{Listen: *listen, DataFile: *data, AdminUsername: *adminUser, AdminPassword: *adminPass})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
 	if *adminUser != "" && *adminPass == "" {
 		fmt.Fprintln(os.Stderr, "设置 admin-user 时必须同时设置 admin-password")
 		os.Exit(2)

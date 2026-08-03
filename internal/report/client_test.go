@@ -19,7 +19,10 @@ import (
 func TestClientAndMonitorSigningProtocol(t *testing.T) {
 	root := t.TempDir()
 	serverState := filepath.Join(root, "monitor.json")
-	monitorServer := monitor.New(monitor.Config{DataFile: serverState})
+	monitorServer, err := monitor.New(monitor.Config{DataFile: serverState})
+	if err != nil {
+		t.Fatal(err)
+	}
 	sharedSecret := "0123456789abcdef0123456789abcdef"
 	if err := monitorServer.AddNode("node-a", "Node A", sharedSecret); err != nil {
 		t.Fatal(err)

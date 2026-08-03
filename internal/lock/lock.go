@@ -35,6 +35,18 @@ func Acquire(id string) (*Lock, error) {
 	}
 	return &Lock{f: f}, nil
 }
+
+func AcquireSlot(prefix string, limit int) (*Lock, error) {
+	if limit < 1 {
+		return nil, fmt.Errorf("并发上限必须大于 0")
+	}
+	for i := 0; i < limit; i++ {
+		if l, err := Acquire(fmt.Sprintf("%s-%d", prefix, i)); err == nil {
+			return l, nil
+		}
+	}
+	return nil, fmt.Errorf("已达到并发任务上限 %d", limit)
+}
 func (l *Lock) Release() {
 	if l != nil && l.f != nil {
 		_ = syscall.Flock(int(l.f.Fd()), syscall.LOCK_UN)

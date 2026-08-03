@@ -215,17 +215,24 @@ func (s *Store) FailOutbox(id, message string, attempts int) error {
 }
 
 func (s *Store) Prune(maxRuns, maxPending int, eventRetention time.Duration) error {
+	var errs []error
 	if maxRuns > 0 {
-		_, _ = s.DB.Exec(`DELETE FROM runs WHERE id NOT IN (SELECT id FROM runs ORDER BY started_at DESC LIMIT ?)`, maxRuns)
+		if _, err := s.DB.Exec(`DELETE FROM runs WHERE id NOT IN (SELECT id FROM runs ORDER BY started_at DESC LIMIT ?)`, maxRuns); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	if eventRetention > 0 {
 		cutoff := time.Now().Add(-eventRetention).UTC().Format(time.RFC3339Nano)
-		_, _ = s.DB.Exec(`DELETE FROM outbox WHERE created_at<?`, cutoff)
+		if _, err := s.DB.Exec(`DELETE FROM outbox WHERE created_at<?`, cutoff); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	if maxPending > 0 {
-		_, _ = s.DB.Exec(`DELETE FROM outbox WHERE id IN (SELECT id FROM outbox ORDER BY created_at DESC LIMIT -1 OFFSET ?)`, maxPending)
+		if _, err := s.DB.Exec(`DELETE FROM outbox WHERE id IN (SELECT id FROM outbox ORDER BY created_at DESC LIMIT -1 OFFSET ?)`, maxPending); err != nil {
+			errs = append(errs, err)
+		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func min(a, b int) int {

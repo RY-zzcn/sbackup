@@ -66,7 +66,10 @@ func Build(c *config.Config, s config.Storage) (Runtime, error) {
 			port = 22
 		}
 		r.Repository = fmt.Sprintf("sftp:%s@%s:%s", s.SFTP.Username, s.SFTP.Host, s.SFTP.Path)
-		r.Env = append(r.Env, fmt.Sprintf("RESTIC_SFTP_COMMAND=ssh -p %d -i %s", port, s.SFTP.KeyFile))
+		if s.SFTP.KeyFile == "" {
+			return r, fmt.Errorf("SFTP 缺少 key_file")
+		}
+		r.Env = append(r.Env, fmt.Sprintf("RESTIC_SFTP_COMMAND=ssh -p %d -i %s", port, shellQuote(s.SFTP.KeyFile)))
 	case "s3":
 		if s.S3 == nil {
 			return r, fmt.Errorf("S3 配置为空")
@@ -90,6 +93,10 @@ func Build(c *config.Config, s config.Storage) (Runtime, error) {
 		return r, fmt.Errorf("不支持的存储类型 %s", s.Type)
 	}
 	return r, nil
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
 func ResticBase(rt Runtime) []string {

@@ -87,6 +87,11 @@ func (s *Service) Run(ctx context.Context, jobID string, scheduled bool) (store.
 		return store.Run{}, err
 	}
 	defer lk.Release()
+	globalLock, err := lock.AcquireSlot("global", s.Config.Global.MaxParallelJobs)
+	if err != nil {
+		return store.Run{}, err
+	}
+	defer globalLock.Release()
 	runID := store.NewID()
 	logger, err := executor.NewLogger(s.Config.Global.LogDir, runID)
 	if err != nil {
@@ -97,7 +102,9 @@ func (s *Service) Run(ctx context.Context, jobID string, scheduled bool) (store.
 	if scheduled {
 		r.ScheduledAt = r.StartedAt
 	}
-	_ = s.Store.SaveRun(r)
+	if err := s.Store.SaveRun(r); err != nil {
+		return store.Run{}, fmt.Errorf("保存运行状态: %w", err)
+	}
 	if s.OnRunStarted != nil {
 		s.OnRunStarted(*j, r)
 	}
@@ -116,7 +123,9 @@ func (s *Service) Run(ctx context.Context, jobID string, scheduled bool) (store.
 		r.ErrorSummary = executor.Redact(e.Error())
 		r.FinishedAt = time.Now().UTC()
 		r.DurationMS = r.FinishedAt.Sub(r.StartedAt).Milliseconds()
-		_ = s.Store.SaveRun(r)
+		if saveErr := s.Store.SaveRun(r); saveErr != nil {
+			return r, fmt.Errorf("%w；且无法保存失败状态: %v", e, saveErr)
+		}
 		logger.Log("error", "completed", r.ErrorSummary)
 		if s.OnRunFinished != nil {
 			s.OnRunFinished(*j, r)
@@ -152,10 +161,15 @@ func (s *Service) Run(ctx context.Context, jobID string, scheduled bool) (store.
 	paths := append([]string{}, j.Sources.Paths...)
 	if len(j.Sources.Databases) > 0 {
 		r.Phase = "preparing_sources"
-		_ = s.Store.SaveRun(r)
+		if err := s.Store.SaveRun(r); err != nil {
+			return fail("STATE_SAVE_FAILED", err)
+		}
 		dbDir := filepath.Join(stage, "databases")
 		for _, id := range j.Sources.Databases {
-			d, _ := s.Config.Database(id)
+			d, ok := s.Config.Database(id)
+			if !ok || d == nil {
+				return fail("CONFIG_ERROR", fmt.Errorf("数据库不存在: %s", id))
+			}
 			p, e := database.Dump(runCtx, s.Config, *d, dbDir, logger)
 			if e != nil {
 				return fail("DATABASE_DUMP_FAILED", e)
@@ -164,7 +178,9 @@ func (s *Service) Run(ctx context.Context, jobID string, scheduled bool) (store.
 		}
 	}
 	r.Phase = "backing_up"
-	_ = s.Store.SaveRun(r)
+	if err := s.Store.SaveRun(r); err != nil {
+		return fail("STATE_SAVE_FAILED", err)
+	}
 	args := repository.ResticBase(rt)
 	args = append(args, "backup", "--json", "--host", s.Config.Global.Hostname, "--tag", "sbackup-job="+j.ID)
 	if j.Restic.Compression != "" {
@@ -219,14 +235,18 @@ func (s *Service) Run(ctx context.Context, jobID string, scheduled bool) (store.
 	warnings := []string{}
 	if j.Retention.ForgetAfterBackup {
 		r.Phase = "retention"
-		_ = s.Store.SaveRun(r)
+		if err := s.Store.SaveRun(r); err != nil {
+			return fail("STATE_SAVE_FAILED", err)
+		}
 		if err := s.Forget(runCtx, j.ID, false, logger); err != nil {
 			warnings = append(warnings, "保留策略失败: "+err.Error())
 		}
 	}
 	if j.Verification.MetadataAfterBackup {
 		r.Phase = "verifying_metadata"
-		_ = s.Store.SaveRun(r)
+		if err := s.Store.SaveRun(r); err != nil {
+			return fail("STATE_SAVE_FAILED", err)
+		}
 		if err := s.Verify(runCtx, j.ID, "metadata", logger); err != nil {
 			warnings = append(warnings, "元数据验证失败: "+err.Error())
 		}
@@ -240,7 +260,9 @@ func (s *Service) Run(ctx context.Context, jobID string, scheduled bool) (store.
 	} else {
 		r.Status = "success"
 	}
-	_ = s.Store.SaveRun(r)
+	if err := s.Store.SaveRun(r); err != nil {
+		return fail("STATE_SAVE_FAILED", err)
+	}
 	logger.Log("info", "completed", fmt.Sprintf("任务%s，快照 %s，新增 %d 字节", map[bool]string{true: "完成但有警告", false: "成功"}[r.Status == "warning"], r.SnapshotID, r.BytesAdded))
 	if s.OnRunFinished != nil {
 		s.OnRunFinished(*j, r)

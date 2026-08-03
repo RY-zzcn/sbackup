@@ -289,6 +289,14 @@ func (c *Config) Validate() error {
 	if _, err := time.LoadLocation(c.Global.Timezone); err != nil {
 		return fmt.Errorf("无效时区 %q", c.Global.Timezone)
 	}
+	for label, path := range map[string]string{"state_db": c.Global.StateDB, "temp_dir": c.Global.TempDir, "log_dir": c.Global.LogDir} {
+		if !filepath.IsAbs(path) {
+			return fmt.Errorf("global.%s 必须是绝对路径", label)
+		}
+	}
+	if c.Global.MaxParallelJobs < 1 || c.Global.LogRetentionDays < 0 || c.Global.LogMaxTotalMB < 0 {
+		return errors.New("全局并发数必须大于 0，日志保留天数和容量不能为负数")
+	}
 	ids := map[string]string{}
 	storageIDs := map[string]bool{}
 	for _, s := range c.Storages {
@@ -315,7 +323,7 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("WebDAV 存储 %s URL 无效", s.ID)
 			}
 		case "sftp":
-			if s.SFTP == nil || s.SFTP.Host == "" || s.SFTP.Username == "" || s.SFTP.Path == "" {
+			if s.SFTP == nil || s.SFTP.Host == "" || s.SFTP.Username == "" || s.SFTP.Path == "" || s.SFTP.KeyFile == "" {
 				return fmt.Errorf("SFTP 存储 %s 配置不完整", s.ID)
 			}
 		case "s3":
@@ -372,7 +380,7 @@ func (c *Config) Validate() error {
 			}
 		}
 		if j.Schedule.Timeout != "" {
-			if _, err := time.ParseDuration(j.Schedule.Timeout); err != nil {
+			if d, err := time.ParseDuration(j.Schedule.Timeout); err != nil || d <= 0 {
 				return fmt.Errorf("任务 %s timeout 无效", j.ID)
 			}
 		}
@@ -380,7 +388,7 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("任务 %s 启用了调度但缺少 expression", j.ID)
 		}
 		if j.Schedule.RandomizedDelay != "" {
-			if _, err := time.ParseDuration(j.Schedule.RandomizedDelay); err != nil {
+			if d, err := time.ParseDuration(j.Schedule.RandomizedDelay); err != nil || d < 0 {
 				return fmt.Errorf("任务 %s randomized_delay 无效", j.ID)
 			}
 		}
@@ -390,7 +398,7 @@ func (c *Config) Validate() error {
 			}
 		}
 		if j.Schedule.GracePeriod != "" {
-			if _, err := time.ParseDuration(j.Schedule.GracePeriod); err != nil {
+			if d, err := time.ParseDuration(j.Schedule.GracePeriod); err != nil || d < 0 {
 				return fmt.Errorf("任务 %s grace_period 无效", j.ID)
 			}
 		}
@@ -416,7 +424,7 @@ func (c *Config) Validate() error {
 			return errors.New("监控 endpoint 必须以 /api/v1/report 结尾")
 		}
 		if c.Monitoring.RequestTimeout != "" {
-			if _, err := time.ParseDuration(c.Monitoring.RequestTimeout); err != nil {
+			if d, err := time.ParseDuration(c.Monitoring.RequestTimeout); err != nil || d <= 0 {
 				return errors.New("request_timeout 无效")
 			}
 		}
@@ -428,8 +436,8 @@ func (c *Config) Validate() error {
 		if c.Monitoring.KeyVersion < 1 {
 			return errors.New("key_version 必须大于 0")
 		}
-		if _, err := time.ParseDuration(c.Monitoring.HeartbeatInterval); c.Monitoring.HeartbeatEnabled && err != nil {
-			return errors.New("heartbeat_interval 无效")
+		if d, err := time.ParseDuration(c.Monitoring.HeartbeatInterval); c.Monitoring.HeartbeatEnabled && (err != nil || d <= 0) {
+			return errors.New("heartbeat_interval 必须是正数时长")
 		}
 	}
 	return nil
@@ -439,12 +447,16 @@ func (c *Config) Validate() error {
 func ParseDuration(value string) (time.Duration, error) {
 	if strings.HasSuffix(value, "d") {
 		days, err := strconv.Atoi(strings.TrimSuffix(value, "d"))
-		if err != nil || days < 0 {
+		if err != nil || days <= 0 {
 			return 0, fmt.Errorf("无效天数 %q", value)
 		}
 		return time.Duration(days) * 24 * time.Hour, nil
 	}
-	return time.ParseDuration(value)
+	d, err := time.ParseDuration(value)
+	if err != nil || d <= 0 {
+		return 0, fmt.Errorf("时长必须大于 0: %q", value)
+	}
+	return d, nil
 }
 
 func validateReadSubset(value string) error {

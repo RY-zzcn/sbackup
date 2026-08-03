@@ -58,7 +58,7 @@ type pageData struct {
 	Reports []reportprotocol.Event
 }
 
-func New(cfg Config) *Server {
+func New(cfg Config) (*Server, error) {
 	if cfg.Listen == "" {
 		cfg.Listen = "127.0.0.1:8788"
 	}
@@ -66,8 +66,10 @@ func New(cfg Config) *Server {
 		cfg.DataFile = "/var/lib/sbackup-monitor/state.json"
 	}
 	s := &Server{cfg: cfg, state: State{Nodes: map[string]Node{}}, nonces: map[string]time.Time{}}
-	_ = s.load()
-	return s
+	if err := s.load(); err != nil {
+		return nil, fmt.Errorf("加载监控状态: %w", err)
+	}
+	return s, nil
 }
 func (s *Server) AddNode(id, name, key string) error {
 	key = strings.TrimSpace(key)
@@ -77,6 +79,10 @@ func (s *Server) AddNode(id, name, key string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	n := s.state.Nodes[id]
+	previous, existed := n, false
+	if old, ok := s.state.Nodes[id]; ok {
+		previous, existed = old, true
+	}
 	n.ID = id
 	n.Name = name
 	digest := sha256.Sum256([]byte(key))
@@ -86,7 +92,15 @@ func (s *Server) AddNode(id, name, key string) error {
 		n.Jobs = map[string]JobState{}
 	}
 	s.state.Nodes[id] = n
-	return s.saveLocked()
+	if err := s.saveLocked(); err != nil {
+		if existed {
+			s.state.Nodes[id] = previous
+		} else {
+			delete(s.state.Nodes, id)
+		}
+		return err
+	}
+	return nil
 }
 func (s *Server) Routes() http.Handler {
 	m := http.NewServeMux()
@@ -163,8 +177,16 @@ func (s *Server) report(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid json", 400)
 		return
 	}
+	if e.Node.ID != "" && e.Node.ID != nodeID {
+		http.Error(w, "node mismatch", http.StatusUnauthorized)
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if expires, seen := s.nonces[nodeID+":"+nonce]; seen && expires.After(time.Now()) {
+		http.Error(w, "replayed request", http.StatusUnauthorized)
+		return
+	}
 	for _, old := range s.state.Reports {
 		if old.EventID == e.EventID {
 			writeJSON(w, map[string]any{"ok": true, "event_id": e.EventID, "duplicate": true, "server_time": time.Now().UTC()})
@@ -174,8 +196,14 @@ func (s *Server) report(w http.ResponseWriter, r *http.Request) {
 	s.nonces[nodeID+":"+nonce] = time.Now().Add(10 * time.Minute)
 	s.cleanupNoncesLocked()
 	previousNode := n
-	previousReportCount := len(s.state.Reports)
+	if previousNode.Jobs != nil {
+		previousNode.Jobs = mapsClone(previousNode.Jobs)
+	}
+	previousReports := append([]reportprotocol.Event(nil), s.state.Reports...)
 	n = s.state.Nodes[nodeID]
+	if n.Jobs != nil {
+		n.Jobs = mapsClone(n.Jobs)
+	}
 	if e.Node.Name != "" {
 		n.Name = e.Node.Name
 	}
@@ -208,7 +236,7 @@ func (s *Server) report(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.saveLocked(); err != nil {
 		s.state.Nodes[nodeID] = previousNode
-		s.state.Reports = s.state.Reports[:previousReportCount]
+		s.state.Reports = previousReports
 		delete(s.nonces, nodeID+":"+nonce)
 		http.Error(w, "state persistence failed", http.StatusInternalServerError)
 		return
@@ -280,6 +308,15 @@ func (s *Server) load() error {
 	if s.state.Nodes == nil {
 		s.state.Nodes = map[string]Node{}
 	}
+	for id, node := range s.state.Nodes {
+		if node.ID == "" {
+			node.ID = id
+		}
+		if node.Jobs == nil {
+			node.Jobs = map[string]JobState{}
+		}
+		s.state.Nodes[id] = node
+	}
 	return nil
 }
 func (s *Server) saveLocked() error {
@@ -296,14 +333,30 @@ func (s *Server) saveLocked() error {
 	}
 	name := tmp.Name()
 	defer os.Remove(name)
-	_ = tmp.Chmod(0600)
+	if err := tmp.Chmod(0600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
 	if _, err := tmp.Write(b); err != nil {
 		tmp.Close()
 		return err
 	}
-	_ = tmp.Sync()
-	_ = tmp.Close()
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
 	return os.Rename(name, s.cfg.DataFile)
+}
+
+func mapsClone(in map[string]JobState) map[string]JobState {
+	out := make(map[string]JobState, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 func (s *Server) cleanupNoncesLocked() {
 	now := time.Now()

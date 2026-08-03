@@ -60,3 +60,16 @@ func TestValidateMonitoringDurations(t *testing.T) {
 		t.Fatal("invalid monitoring duration accepted")
 	}
 }
+
+func TestValidateRejectsUnsafeGlobalSettings(t *testing.T) {
+	c := validConfig(t)
+	c.Global.TempDir = "relative/tmp"
+	if err := c.Validate(); err == nil {
+		t.Fatal("relative temp_dir accepted")
+	}
+	c = validConfig(t)
+	c.Global.MaxParallelJobs = 0
+	if err := c.Validate(); err == nil {
+		t.Fatal("zero max_parallel_jobs accepted")
+	}
+}

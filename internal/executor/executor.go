@@ -26,6 +26,7 @@ type Logger struct {
 	file  *os.File
 	Path  string
 	Quiet bool
+	mu    sync.Mutex
 }
 
 func NewLogger(dir, runID string) (*Logger, error) {
@@ -43,12 +44,16 @@ func (l *Logger) Close() error {
 	if l == nil || l.file == nil {
 		return nil
 	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	return l.file.Close()
 }
 func (l *Logger) Log(level, phase, msg string) {
 	msg = Redact(msg)
 	e := Event{Time: time.Now().UTC(), Level: level, Phase: phase, Message: msg}
 	if l != nil && l.file != nil {
+		l.mu.Lock()
+		defer l.mu.Unlock()
 		b, _ := json.Marshal(e)
 		_, _ = l.file.Write(append(b, '\n'))
 	}
@@ -96,6 +101,7 @@ func Run(ctx context.Context, logger *Logger, phase, name string, args []string,
 	}
 	var lines []string
 	var linesMu sync.Mutex
+	var callbackMu sync.Mutex
 	done := make(chan struct{}, 2)
 	read := func(r io.Reader, level string) {
 		defer func() { done <- struct{}{} }()
@@ -110,7 +116,9 @@ func Run(ctx context.Context, logger *Logger, phase, name string, args []string,
 			}
 			linesMu.Unlock()
 			if onLine != nil {
+				callbackMu.Lock()
 				onLine(line)
+				callbackMu.Unlock()
 			} else if logger != nil {
 				logger.Log(level, phase, line)
 			}

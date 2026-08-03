@@ -69,18 +69,17 @@ func (c *Client) Send(ctx context.Context, e reportprotocol.Event) error {
 	if err != nil {
 		return err
 	}
-	ts := strconv.FormatInt(time.Now().Unix(), 10)
-	nonce := store.NewID()
-	path := "/api/v1/report"
-	canonical := "POST\n" + path + "\n" + ts + "\n" + nonce + "\n" + shaHex(b)
-	keyDigest := sha256.Sum256(bytes.TrimSpace(key))
-	mac := hmac.New(sha256.New, keyDigest[:])
-	_, _ = mac.Write([]byte(canonical))
-	sig := hex.EncodeToString(mac.Sum(nil))
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimSuffix(m.Endpoint, "/"), bytes.NewReader(b))
 	if err != nil {
 		return err
 	}
+	ts := strconv.FormatInt(time.Now().Unix(), 10)
+	nonce := store.NewID()
+	canonical := "POST\n" + req.URL.Path + "\n" + ts + "\n" + nonce + "\n" + shaHex(b)
+	keyDigest := sha256.Sum256(bytes.TrimSpace(key))
+	mac := hmac.New(sha256.New, keyDigest[:])
+	_, _ = mac.Write([]byte(canonical))
+	sig := hex.EncodeToString(mac.Sum(nil))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-SBackup-Node", m.NodeID)
 	req.Header.Set("X-SBackup-Key-Version", strconv.Itoa(m.KeyVersion))
@@ -114,10 +113,13 @@ func (c *Client) Test(ctx context.Context) error {
 	defer func() { c.Config.Monitoring.Enabled = wasEnabled }()
 	return c.Send(ctx, c.Heartbeat())
 }
-func (c *Client) SendOrQueue(ctx context.Context, e reportprotocol.Event) {
+func (c *Client) SendOrQueue(ctx context.Context, e reportprotocol.Event) error {
 	if err := c.Send(ctx, e); err != nil {
-		_, _ = c.Store.Enqueue("report", c.Config.Monitoring.Endpoint, e)
+		if _, queueErr := c.Store.Enqueue("report", c.Config.Monitoring.Endpoint, e); queueErr != nil {
+			return fmt.Errorf("发送监控事件失败: %v；加入重试队列失败: %w", err, queueErr)
+		}
 	}
+	return nil
 }
 func shaHex(b []byte) string { x := sha256.Sum256(b); return hex.EncodeToString(x[:]) }
 func short(s string) string {

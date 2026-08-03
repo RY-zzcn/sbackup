@@ -21,7 +21,9 @@ import (
 	"time"
 )
 
-func Run(c *config.Config, path string, save func() error) error {
+type RunJobFunc func(context.Context, string, bool) (store.Run, error)
+
+func Run(c *config.Config, path string, save func() error, runJob RunJobFunc) error {
 	in := bufio.NewReader(os.Stdin)
 	for {
 		fmt.Println("\nSBackup - 轻量备份")
@@ -40,9 +42,9 @@ func Run(c *config.Config, path string, save func() error) error {
 		changed := false
 		switch strings.TrimSpace(line) {
 		case "1":
-			quickSetup(c, path, in, save)
+			quickSetup(c, path, in, save, runJob)
 		case "2":
-			runBackup(c, in)
+			runBackup(c, in, runJob)
 			changed = false
 		case "3":
 			restoreWizard(c, in)
@@ -53,7 +55,7 @@ func Run(c *config.Config, path string, save func() error) error {
 		case "5":
 			changed = monitor(c, in)
 		case "6":
-			changed = advancedMenu(c, path, in, save)
+			changed = advancedMenu(c, path, in, save, runJob)
 		case "0", "":
 			return nil
 		default:
@@ -88,7 +90,7 @@ func selectJob(c *config.Config, in *bufio.Reader) (*config.Job, bool) {
 	return &c.Jobs[n-1], true
 }
 
-func quickSetup(c *config.Config, configPath string, in *bufio.Reader, save func() error) {
+func quickSetup(c *config.Config, configPath string, in *bufio.Reader, save func() error, runJob RunJobFunc) {
 	fmt.Println("\n快速设置会依次完成：存储、加密密码、仓库初始化、备份目录和每天自动备份。")
 	fmt.Println("1. 本机或挂载磁盘（最简单）")
 	fmt.Println("2. WebDAV 网盘")
@@ -134,10 +136,10 @@ func quickSetup(c *config.Config, configPath string, in *bufio.Reader, save func
 		return
 	}
 	fmt.Println("仓库初始化完成。")
-	finishJobSetup(c, configPath, storage.ID, in, save)
+	finishJobSetup(c, configPath, storage.ID, in, save, runJob)
 }
 
-func finishJobSetup(c *config.Config, configPath, storageID string, in *bufio.Reader, save func() error) {
+func finishJobSetup(c *config.Config, configPath, storageID string, in *bufio.Reader, save func() error, runJob RunJobFunc) {
 	job, ok := newJob(storageID, in)
 	if !ok {
 		fmt.Println("未创建备份任务；仓库配置已保留，可稍后继续设置。")
@@ -167,7 +169,7 @@ func finishJobSetup(c *config.Config, configPath, storageID string, in *bufio.Re
 	fmt.Print("现在立即执行第一次备份吗？[Y/n]: ")
 	answer, _ := in.ReadString('\n')
 	if strings.ToLower(strings.TrimSpace(answer)) != "n" {
-		runOne(c, job.ID)
+		runOne(c, job.ID, runJob)
 	}
 	fmt.Println("快速设置完成。以后直接运行 sudo sbackup 即可备份或恢复。")
 }
@@ -305,14 +307,23 @@ func installJobSchedule(job config.Job, configPath string) error {
 	return nil
 }
 
-func runBackup(c *config.Config, in *bufio.Reader) {
+func runBackup(c *config.Config, in *bufio.Reader, runJob RunJobFunc) {
 	job, ok := selectJob(c, in)
 	if ok {
-		runOne(c, job.ID)
+		runOne(c, job.ID, runJob)
 	}
 }
 
-func runOne(c *config.Config, jobID string) {
+func runOne(c *config.Config, jobID string, runJob RunJobFunc) {
+	if runJob != nil {
+		run, err := runJob(context.Background(), jobID, false)
+		if err != nil {
+			fmt.Println("备份失败:", err)
+			return
+		}
+		fmt.Println("备份完成，快照:", run.SnapshotID)
+		return
+	}
 	st, err := store.Open(c.Global.StateDB)
 	if err != nil {
 		fmt.Println("打开状态库失败:", err)
@@ -327,7 +338,7 @@ func runOne(c *config.Config, jobID string) {
 	fmt.Println("备份完成，快照:", run.SnapshotID)
 }
 
-func advancedMenu(c *config.Config, configPath string, in *bufio.Reader, save func() error) bool {
+func advancedMenu(c *config.Config, configPath string, in *bufio.Reader, save func() error, runJob RunJobFunc) bool {
 	fmt.Println("\n高级管理")
 	fmt.Println("1. 管理任务启用状态")
 	fmt.Println("2. 查看存储")
@@ -347,7 +358,7 @@ func advancedMenu(c *config.Config, configPath string, in *bufio.Reader, save fu
 	case "4":
 		storage, ok := selectStorage(c, in)
 		if ok {
-			finishJobSetup(c, configPath, storage.ID, in, save)
+			finishJobSetup(c, configPath, storage.ID, in, save, runJob)
 		}
 	case "5":
 		if err := c.Validate(); err != nil {

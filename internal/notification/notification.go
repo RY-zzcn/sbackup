@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -35,12 +36,16 @@ type Service struct {
 	Client *http.Client
 }
 
-func (s *Service) SendIDs(ctx context.Context, ids []string, e Event) {
+func (s *Service) SendIDs(ctx context.Context, ids []string, e Event) error {
+	var errs []error
 	for _, id := range ids {
 		if err := s.Send(ctx, id, e); err != nil {
-			_, _ = s.Store.Enqueue("notification", id, e)
+			if _, queueErr := s.Store.Enqueue("notification", id, e); queueErr != nil {
+				errs = append(errs, fmt.Errorf("通知 %s 发送失败: %v；加入重试队列失败: %w", id, err, queueErr))
+			}
 		}
 	}
+	return errors.Join(errs...)
 }
 func (s *Service) Send(ctx context.Context, id string, e Event) error {
 	n, ok := s.Config.Notification(id)
@@ -138,7 +143,10 @@ func (s *Service) sendHTTP(ctx context.Context, n config.Notification, secret ma
 		url = str(n.Settings["url"]) + "/" + secret["device_key"]
 		payload = map[string]any{"title": e.Title, "body": e.Body}
 	}
-	b, _ := json.Marshal(payload)
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(b))
 	if err != nil {
 		return err

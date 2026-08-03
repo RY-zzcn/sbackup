@@ -53,7 +53,17 @@ func main() {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(2)
 		}
-		_ = tui.Run(c, path, func() error { return config.Save(path, c) })
+		runJob := func(ctx context.Context, jobID string, scheduled bool) (store.Run, error) {
+			st, err := store.Open(c.Global.StateDB)
+			if err != nil {
+				return store.Run{}, err
+			}
+			defer st.Close()
+			return serviceFor(c, st).Run(ctx, jobID, scheduled)
+		}
+		if err := tui.Run(c, path, func() error { return config.Save(path, c) }, runJob); err != nil {
+			fatal(err, 1)
+		}
 		return
 	}
 	cmd := args[0]
@@ -121,12 +131,19 @@ func svc(path string) (*config.Config, *store.Store, *backup.Service) {
 	if err != nil {
 		fatal(err, 1)
 	}
+	s := serviceFor(c, st)
+	return c, st, s
+}
+
+func serviceFor(c *config.Config, st *store.Store) *backup.Service {
 	s := &backup.Service{Config: c, Store: st}
 	notify := &notification.Service{Config: c, Store: st}
 	rep := &report.Client{Config: c, Store: st, Version: version}
 	s.OnRunStarted = func(j config.Job, r store.Run) {
 		if c.Monitoring.Enabled && j.Monitoring.Report {
-			rep.SendOrQueue(context.Background(), rep.EventForRun(j, r, "run.started"))
+			if err := rep.SendOrQueue(context.Background(), rep.EventForRun(j, r, "run.started")); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+			}
 		}
 	}
 	s.OnRunFinished = func(j config.Job, r store.Run) {
@@ -142,12 +159,16 @@ func svc(path string) (*config.Config, *store.Store, *backup.Service) {
 		} else if r.Status == "failed" {
 			ids = j.Notifications.OnFailure
 		}
-		notify.SendIDs(context.Background(), ids, e)
+		if err := notify.SendIDs(context.Background(), ids, e); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+		}
 		if c.Monitoring.Enabled && j.Monitoring.Report {
-			rep.SendOrQueue(context.Background(), rep.EventForRun(j, r, "run.completed"))
+			if err := rep.SendOrQueue(context.Background(), rep.EventForRun(j, r, "run.completed")); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+			}
 		}
 	}
-	return c, st, s
+	return s
 }
 func configCmd(path string, args []string) {
 	if len(args) > 0 && args[0] == "validate" {
@@ -180,8 +201,13 @@ func statusCmd(path string, args []string) {
 	c, st, _ := svc(path)
 	defer st.Close()
 	if len(args) > 0 && args[0] == "--json" {
-		rs, _ := st.RecentRuns("", 20)
-		json.NewEncoder(os.Stdout).Encode(rs)
+		rs, err := st.RecentRuns("", 20)
+		if err != nil {
+			fatal(err, 1)
+		}
+		if err := json.NewEncoder(os.Stdout).Encode(rs); err != nil {
+			fatal(err, 1)
+		}
 		return
 	}
 	fmt.Printf("主机 %s，任务 %d，存储 %d\n", c.Global.DisplayName, len(c.Jobs), len(c.Storages))
@@ -232,14 +258,18 @@ func jobCmd(path string, args []string) {
 			os.Exit(4)
 		}
 	case "run-all":
+		failed := false
 		for _, j := range c.Jobs {
 			if j.Enabled {
-				r, err := s.Run(context.Background(), j.ID, true)
+				r, err := s.Run(context.Background(), j.ID, false)
 				fmt.Println(j.ID, r.Status)
 				if err != nil {
-					_ = err
+					failed = true
 				}
 			}
+		}
+		if failed {
+			fatal(fmt.Errorf("一个或多个任务执行失败"), 4)
 		}
 	case "enable", "disable":
 		if len(args) < 2 {
@@ -598,7 +628,9 @@ func monitorCmd(path string, args []string) {
 		fmt.Println("监控上报成功")
 	case "heartbeat":
 		r := &report.Client{Config: c, Store: st, Version: version}
-		r.SendOrQueue(context.Background(), r.Heartbeat())
+		if err := r.SendOrQueue(context.Background(), r.Heartbeat()); err != nil {
+			fatal(err, 1)
+		}
 	default:
 		fatal(fmt.Errorf("未知 monitor 子命令"), 2)
 	}
@@ -635,7 +667,10 @@ func scheduleCmd(path string, args []string) {
 func maintenanceCmd(path string) {
 	c, st, _ := svc(path)
 	defer st.Close()
-	items, _ := st.DueOutbox(100)
+	items, err := st.DueOutbox(100)
+	if err != nil {
+		fatal(err, 1)
+	}
 	rep := &report.Client{Config: c, Store: st, Version: version}
 	notify := &notification.Service{Config: c, Store: st}
 	for _, o := range items {
@@ -658,16 +693,30 @@ func maintenanceCmd(path string) {
 			err = fmt.Errorf("未知 outbox 类型 %q", o.Kind)
 		}
 		if err == nil {
-			_ = st.CompleteOutbox(o.ID)
+			if err := st.CompleteOutbox(o.ID); err != nil {
+				fatal(err, 1)
+			}
 		} else {
-			_ = st.FailOutbox(o.ID, err.Error(), o.Attempts+1)
+			if failErr := st.FailOutbox(o.ID, err.Error(), o.Attempts+1); failErr != nil {
+				fatal(failErr, 1)
+			}
 		}
 	}
 	if c.Monitoring.Enabled && c.Monitoring.HeartbeatEnabled {
-		rep.SendOrQueue(context.Background(), rep.Heartbeat())
+		if err := rep.SendOrQueue(context.Background(), rep.Heartbeat()); err != nil {
+			fatal(err, 1)
+		}
 	}
-	retention, _ := config.ParseDuration(c.Monitoring.EventRetention)
-	_ = st.Prune(10000, c.Monitoring.MaxPendingEvents, retention)
+	retention := time.Duration(0)
+	if c.Monitoring.EventRetention != "" {
+		retention, err = config.ParseDuration(c.Monitoring.EventRetention)
+		if err != nil {
+			fatal(err, 2)
+		}
+	}
+	if err := st.Prune(10000, c.Monitoring.MaxPendingEvents, retention); err != nil {
+		fatal(err, 1)
+	}
 	fmt.Printf("处理 %d 个待发送事件\n", len(items))
 }
 func doctorCmd(path string) {

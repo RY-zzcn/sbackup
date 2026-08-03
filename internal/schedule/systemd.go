@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 
 	"sbackup/internal/config"
 )
@@ -15,6 +16,11 @@ var safeID = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 func Install(job config.Job, bin, configPath, dir string) error {
 	if !safeID.MatchString(job.ID) {
 		return fmt.Errorf("无效任务 ID")
+	}
+	for name, value := range map[string]string{"bin": bin, "config": configPath, "expression": job.Schedule.Expression, "delay": job.Schedule.RandomizedDelay} {
+		if strings.ContainsAny(value, "\r\n") {
+			return fmt.Errorf("%s 不能包含换行", name)
+		}
 	}
 	if dir == "" {
 		dir = "/etc/systemd/system"

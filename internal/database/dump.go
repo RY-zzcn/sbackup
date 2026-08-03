@@ -63,7 +63,7 @@ func dumpPostgres(ctx context.Context, c *config.Config, d config.Database, dir 
 	if port == 0 {
 		port = 5432
 	}
-	line := fmt.Sprintf("%s:%d:%s:%s:%s\n", host, port, d.Database, d.Username, creds["password"])
+	line := strings.Join([]string{pgpassEscape(host), strconv.Itoa(port), pgpassEscape(d.Database), pgpassEscape(d.Username), pgpassEscape(creds["password"])}, ":") + "\n"
 	if err := os.WriteFile(pgpass, []byte(line), 0600); err != nil {
 		return "", err
 	}
@@ -86,7 +86,7 @@ func dumpMySQL(ctx context.Context, c *config.Config, d config.Database, dir str
 	if port == 0 {
 		port = 3306
 	}
-	content := fmt.Sprintf("[client]\nhost=%s\nport=%d\nuser=%s\npassword=%s\n", d.Host, port, d.Username, creds["password"])
+	content := fmt.Sprintf("[client]\nhost=%s\nport=%d\nuser=%s\npassword=%s\n", mySQLConfigValue(d.Host), port, mySQLConfigValue(d.Username), mySQLConfigValue(creds["password"]))
 	if err := os.WriteFile(defaults, []byte(content), 0600); err != nil {
 		return "", err
 	}
@@ -112,6 +112,19 @@ func dumpMySQL(ctx context.Context, c *config.Config, d config.Database, dir str
 		return "", fmt.Errorf("MySQL 导出失败: %s", executor.Redact(stderr.String()))
 	}
 	return out, nil
+}
+
+func pgpassEscape(value string) string {
+	value = strings.ReplaceAll(value, `\`, `\\`)
+	value = strings.ReplaceAll(value, `:`, `\:`)
+	value = strings.ReplaceAll(value, "\n", `\n`)
+	return strings.ReplaceAll(value, "\r", `\r`)
+}
+
+func mySQLConfigValue(value string) string {
+	value = strings.ReplaceAll(value, `\`, `\\`)
+	value = strings.ReplaceAll(value, "\n", `\n`)
+	return strings.ReplaceAll(value, "\r", `\r`)
 }
 func dumpSQLite(ctx context.Context, c *config.Config, d config.Database, dir string, l *executor.Logger) (string, error) {
 	outPath := filepath.Join(dir, d.ID+".db")
