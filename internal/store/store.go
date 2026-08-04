@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -146,6 +147,45 @@ func (s *Store) LastRun(jobID string) (Run, error) {
 		return Run{}, sql.ErrNoRows
 	}
 	return runs[0], nil
+}
+
+// DeleteJobRuns removes local run metadata for a job and optionally log files
+// located below logDir. Repository snapshots are never touched.
+func (s *Store) DeleteJobRuns(jobID string, deleteLogs bool, logDir string) error {
+	runs, err := s.RecentRuns(jobID, 1000000)
+	if err != nil {
+		return err
+	}
+	if _, err := s.DB.Exec(`DELETE FROM runs WHERE job_id=?`, jobID); err != nil {
+		return err
+	}
+	if deleteLogs {
+		var errs []error
+		for _, run := range runs {
+			if run.LogPath == "" {
+				continue
+			}
+			if !pathWithin(logDir, run.LogPath) {
+				errs = append(errs, fmt.Errorf("拒绝删除日志目录外的文件: %s", run.LogPath))
+				continue
+			}
+			if err := os.Remove(run.LogPath); err != nil && !os.IsNotExist(err) {
+				errs = append(errs, err)
+			}
+		}
+		return errors.Join(errs...)
+	}
+	return nil
+}
+
+func pathWithin(root, path string) bool {
+	if root == "" || path == "" {
+		return false
+	}
+	root = filepath.Clean(root)
+	path = filepath.Clean(path)
+	rel, err := filepath.Rel(root, path)
+	return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func (s *Store) LastCompletedBefore(jobID, runID string) (Run, error) {

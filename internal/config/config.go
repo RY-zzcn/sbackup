@@ -165,6 +165,7 @@ type Restic struct {
 	ReadConcurrency int      `yaml:"read_concurrency"`
 	PackSizeMB      int      `yaml:"pack_size_mb"`
 	ExtraTags       []string `yaml:"extra_tags"`
+	BackupMode      string   `yaml:"backup_mode,omitempty"`
 }
 
 type JobNotifications struct {
@@ -343,8 +344,8 @@ func (c *Config) Validate() error {
 		if d.Type != "postgres" && d.Type != "mysql" && d.Type != "sqlite" {
 			return fmt.Errorf("数据库 %s 类型无效", d.ID)
 		}
-		if d.Type == "sqlite" && d.Path == "" {
-			return fmt.Errorf("SQLite %s 缺少 path", d.ID)
+		if d.Type == "sqlite" && (d.Path == "" || !filepath.IsAbs(d.Path)) {
+			return fmt.Errorf("SQLite %s 的 path 必须是绝对路径", d.ID)
 		}
 		if d.Type != "sqlite" && d.CredentialFile == "" {
 			return fmt.Errorf("数据库 %s 缺少 credential_file", d.ID)
@@ -384,8 +385,28 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("任务 %s timeout 无效", j.ID)
 			}
 		}
-		if j.Schedule.Enabled && j.Schedule.Expression == "" {
-			return fmt.Errorf("任务 %s 启用了调度但缺少 expression", j.ID)
+		if j.Schedule.Enabled {
+			if j.Schedule.Expression == "" {
+				return fmt.Errorf("任务 %s 启用了调度但缺少 expression", j.ID)
+			}
+			scheduleType := j.Schedule.Type
+			if scheduleType == "" {
+				scheduleType = "calendar"
+			}
+			switch scheduleType {
+			case "calendar":
+				for _, expression := range strings.Split(j.Schedule.Expression, ";") {
+					if strings.TrimSpace(expression) == "" {
+						return fmt.Errorf("任务 %s 包含空的日历调度表达式", j.ID)
+					}
+				}
+			case "interval":
+				if d, err := time.ParseDuration(j.Schedule.Expression); err != nil || d < time.Minute {
+					return fmt.Errorf("任务 %s 的间隔调度无效（最短 1m）", j.ID)
+				}
+			default:
+				return fmt.Errorf("任务 %s 的调度类型 %q 无效", j.ID, j.Schedule.Type)
+			}
 		}
 		if j.Schedule.RandomizedDelay != "" {
 			if d, err := time.ParseDuration(j.Schedule.RandomizedDelay); err != nil || d < 0 {
@@ -401,6 +422,12 @@ func (c *Config) Validate() error {
 			if d, err := time.ParseDuration(j.Schedule.GracePeriod); err != nil || d < 0 {
 				return fmt.Errorf("任务 %s grace_period 无效", j.ID)
 			}
+		}
+		if j.Restic.BackupMode != "" && j.Restic.BackupMode != "incremental" && j.Restic.BackupMode != "full" {
+			return fmt.Errorf("任务 %s 的 backup_mode 必须是 incremental 或 full", j.ID)
+		}
+		if j.Restic.Compression != "" && j.Restic.Compression != "auto" && j.Restic.Compression != "off" && j.Restic.Compression != "max" {
+			return fmt.Errorf("任务 %s 的 compression 必须是 auto、off 或 max", j.ID)
 		}
 		if hasDuplicates(j.Sources.Paths) || hasDuplicates(j.Sources.Databases) {
 			return fmt.Errorf("任务 %s 包含重复来源", j.ID)

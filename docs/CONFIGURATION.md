@@ -111,7 +111,8 @@ jobs:
     schedule:
       enabled: true
       type: calendar
-      expression: "*-*-* 02:30:00"
+      # 多个每天时间点用分号连接；固定间隔则用 type: interval 和 expression: 6h
+      expression: "*-*-* 02:30:00;*-*-* 14:30:00"
       persistent: true
       randomized_delay: 10m
       grace_period: 45m
@@ -136,6 +137,8 @@ jobs:
       compression: auto
       read_concurrency: 2
       pack_size_mb: 16
+      # incremental=智能增量扫描，full=每次强制重新扫描全部源文件
+      backup_mode: incremental
       extra_tags:
         - production
 
@@ -272,6 +275,8 @@ Gotify：
 - 所有 ID 必须匹配 `[a-z0-9][a-z0-9_-]{0,63}`。
 - job 引用的 storage、database source 和 notification 必须存在。
 - 启用自动任务时必须配置合法时区和 schedule。
+- `schedule.type` 支持 `calendar`（单个或分号分隔的多个 OnCalendar 表达式）和 `interval`（如 `30m`、`6h`、`24h`，最短 1 分钟）。
+- `restic.backup_mode` 支持 `incremental` 和 `full`；两者产生的快照都可完整恢复，全量模式仍保留内容去重。
 - WebDAV 默认要求 HTTPS。
 - 关闭 TLS 校验必须进行交互式危险确认，非交互模式需要显式危险参数。
 - 任务至少包含一个目录或数据库来源。
@@ -280,6 +285,10 @@ Gotify：
 - 保留策略必须至少保留一个快照，除非使用显式危险配置。
 - full check 的读取比例必须在 1% 到 100% 之间。
 - 监控 endpoint 不能携带用户名密码形式的 URL 凭据。
+
+## 5. 任务删除语义
+
+交互菜单删除任务时只删除本机 `jobs` 配置和对应 systemd timer，可选择是否同时删除该任务的本地运行历史与 JSONL 日志。Restic 仓库中的快照不会自动删除，仍可通过保留原存储配置或 Restic 命令访问。
 
 ## 5. 配置迁移
 

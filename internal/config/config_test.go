@@ -73,3 +73,34 @@ func TestValidateRejectsUnsafeGlobalSettings(t *testing.T) {
 		t.Fatal("zero max_parallel_jobs accepted")
 	}
 }
+
+func TestValidateRejectsRelativeSQLitePath(t *testing.T) {
+	c := validConfig(t)
+	c.Databases = []Database{{ID: "sqlite", Name: "sqlite", Type: "sqlite", Path: "relative.db"}}
+	if err := c.Validate(); err == nil {
+		t.Fatal("relative SQLite path accepted")
+	}
+}
+
+func TestValidateScheduleTypesAndBackupMode(t *testing.T) {
+	c := validConfig(t)
+	c.Jobs[0].Schedule = Schedule{Enabled: true, Type: "interval", Expression: "6h"}
+	c.Jobs[0].Restic.BackupMode = "full"
+	if err := c.Validate(); err != nil {
+		t.Fatalf("valid interval/full configuration rejected: %v", err)
+	}
+	c.Jobs[0].Schedule.Expression = "10s"
+	if err := c.Validate(); err == nil {
+		t.Fatal("too short interval accepted")
+	}
+	c = validConfig(t)
+	c.Jobs[0].Restic.BackupMode = "legacy"
+	if err := c.Validate(); err == nil {
+		t.Fatal("invalid backup mode accepted")
+	}
+	c = validConfig(t)
+	c.Jobs[0].Restic.Compression = "invalid"
+	if err := c.Validate(); err == nil {
+		t.Fatal("invalid compression accepted")
+	}
+}

@@ -75,12 +75,23 @@ func (s *Service) SnapshotFiles(ctx context.Context, jobID, snapshot, pathFilter
 }
 
 func (s *Service) Run(ctx context.Context, jobID string, scheduled bool) (store.Run, error) {
+	return s.RunWithMode(ctx, jobID, scheduled, "")
+}
+
+// RunWithMode runs a job and optionally overrides its configured backup mode.
+// Restic snapshots are always independently restorable. "full" forces a complete
+// source scan while retaining Restic's content deduplication.
+func (s *Service) RunWithMode(ctx context.Context, jobID string, scheduled bool, mode string) (store.Run, error) {
 	j, ok := s.Config.Job(jobID)
 	if !ok {
 		return store.Run{}, fmt.Errorf("任务不存在: %s", jobID)
 	}
 	if !j.Enabled {
 		return store.Run{}, fmt.Errorf("任务已禁用")
+	}
+	mode, err := backupMode(*j, mode)
+	if err != nil {
+		return store.Run{}, err
 	}
 	lk, err := lock.Acquire("job-" + j.ID)
 	if err != nil {
@@ -182,7 +193,10 @@ func (s *Service) Run(ctx context.Context, jobID string, scheduled bool) (store.
 		return fail("STATE_SAVE_FAILED", err)
 	}
 	args := repository.ResticBase(rt)
-	args = append(args, "backup", "--json", "--host", s.Config.Global.Hostname, "--tag", "sbackup-job="+j.ID)
+	args = append(args, "backup", "--json", "--host", s.Config.Global.Hostname, "--tag", "sbackup-job="+j.ID, "--tag", "sbackup-mode="+mode)
+	if mode == "full" {
+		args = append(args, "--force")
+	}
 	if j.Restic.Compression != "" {
 		args = append(args, "--compression", j.Restic.Compression)
 	}
@@ -268,6 +282,20 @@ func (s *Service) Run(ctx context.Context, jobID string, scheduled bool) (store.
 		s.OnRunFinished(*j, r)
 	}
 	return r, nil
+}
+
+func backupMode(job config.Job, override string) (string, error) {
+	mode := override
+	if mode == "" {
+		mode = job.Restic.BackupMode
+	}
+	if mode == "" {
+		mode = "incremental"
+	}
+	if mode != "incremental" && mode != "full" {
+		return "", fmt.Errorf("无效备份模式 %q（可选 incremental 或 full）", mode)
+	}
+	return mode, nil
 }
 
 func (s *Service) runtime(jobID string) (*config.Job, repository.Runtime, error) {

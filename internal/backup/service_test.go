@@ -3,6 +3,8 @@ package backup
 import (
 	"encoding/json"
 	"testing"
+
+	"sbackup/internal/config"
 )
 
 func TestResticSummaryJSONTags(t *testing.T) {
@@ -13,5 +15,18 @@ func TestResticSummaryJSONTags(t *testing.T) {
 	}
 	if s.SnapshotID != "snap" || s.FilesChanged != 3 || s.TotalBytesProcessed != 6 {
 		t.Fatalf("bad summary: %#v", s)
+	}
+}
+
+func TestBackupMode(t *testing.T) {
+	job := config.Job{Restic: config.Restic{BackupMode: "full"}}
+	if got, err := backupMode(job, ""); err != nil || got != "full" {
+		t.Fatalf("configured mode: got=%q err=%v", got, err)
+	}
+	if got, err := backupMode(job, "incremental"); err != nil || got != "incremental" {
+		t.Fatalf("override mode: got=%q err=%v", got, err)
+	}
+	if _, err := backupMode(job, "invalid"); err == nil {
+		t.Fatal("invalid mode accepted")
 	}
 }

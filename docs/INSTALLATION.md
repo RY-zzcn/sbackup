@@ -71,6 +71,31 @@ rclone version
 
 `doctor` 会检查实际配置引用的数据库命令、Restic 和 WebDAV 所需的 rclone，以及所有密钥文件权限。使用本地、SFTP 或 S3 时不要求安装 rclone。
 
+## 运行历史与日志
+
+每次备份都会在状态数据库记录开始和结束时间、成功/警告/失败状态、快照 ID、耗时、文件数量、处理数据量和错误摘要，并在日志目录生成独立 JSONL 文件。推荐直接进入 `sudo sbackup` 的“备份历史与运行日志”菜单查看。
+
+命令行也可使用：
+
+```bash
+sbackup logs list --limit 50
+sbackup logs list --job home --limit 100
+sbackup logs show <run-id>
+```
+
+## 卸载
+
+可以从 `sudo sbackup` → “系统设置与卸载”操作，也可以执行：
+
+```bash
+sudo /usr/local/share/sbackup/scripts/uninstall.sh
+sudo /usr/local/share/sbackup/scripts/uninstall.sh --purge
+# 自动化脚本中必须显式确认：
+sudo /usr/local/share/sbackup/scripts/uninstall.sh --purge --yes
+```
+
+普通卸载保留配置、密钥、状态和日志；`--purge` 永久清理这些本机数据。两种方式都会停止并移除维护定时器和所有任务定时器，但不会删除 Restic 仓库、仓库快照或系统级 Restic/rclone。
+
 ## 备份配置与灾难恢复
 
 至少离线保存：

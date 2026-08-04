@@ -53,13 +53,13 @@ func main() {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(2)
 		}
-		runJob := func(ctx context.Context, jobID string, scheduled bool) (store.Run, error) {
+		runJob := func(ctx context.Context, jobID string, scheduled bool, mode string) (store.Run, error) {
 			st, err := store.Open(c.Global.StateDB)
 			if err != nil {
 				return store.Run{}, err
 			}
 			defer st.Close()
-			return serviceFor(c, st).Run(ctx, jobID, scheduled)
+			return serviceFor(c, st).RunWithMode(ctx, jobID, scheduled, mode)
 		}
 		if err := tui.Run(c, path, func() error { return config.Save(path, c) }, runJob); err != nil {
 			fatal(err, 1)
@@ -222,7 +222,7 @@ func statusCmd(path string, args []string) {
 }
 func jobCmd(path string, args []string) {
 	if len(args) < 1 {
-		fmt.Println("job list|run|run-all|enable|disable")
+		fmt.Println("job list|show|run|run-all|enable|disable|remove")
 		return
 	}
 	c, st, s := svc(path)
@@ -247,12 +247,25 @@ func jobCmd(path string, args []string) {
 			fatal(fmt.Errorf("缺少任务 ID"), 2)
 		}
 		scheduled := false
-		for _, arg := range args[2:] {
+		mode := ""
+		opts := args[2:]
+		for i := 0; i < len(opts); i++ {
+			arg := opts[i]
 			if arg == "--scheduled" {
 				scheduled = true
+				continue
 			}
+			if arg == "--mode" {
+				if i+1 >= len(opts) {
+					fatal(fmt.Errorf("--mode 缺少值（incremental 或 full）"), 2)
+				}
+				i++
+				mode = opts[i]
+				continue
+			}
+			fatal(fmt.Errorf("未知参数 %s", arg), 2)
 		}
-		r, err := s.Run(context.Background(), args[1], scheduled)
+		r, err := s.RunWithMode(context.Background(), args[1], scheduled, mode)
 		fmt.Println(r.Status, r.SnapshotID)
 		if err != nil {
 			os.Exit(4)
@@ -283,6 +296,26 @@ func jobCmd(path string, args []string) {
 		if err := config.Save(path, c); err != nil {
 			fatal(err, 1)
 		}
+		bin, _ := os.Executable()
+		unit := "sbackup-job-" + j.ID + ".timer"
+		if j.Enabled && j.Schedule.Enabled {
+			if err := schedule.Install(*j, bin, path, "/etc/systemd/system"); err != nil {
+				fatal(fmt.Errorf("任务状态已保存，但定时器生成失败: %w", err), 1)
+			}
+			if output, err := exec.Command("systemctl", "daemon-reload").CombinedOutput(); err != nil {
+				fatal(fmt.Errorf("任务状态已保存，但 systemd reload 失败: %w: %s", err, strings.TrimSpace(string(output))), 1)
+			}
+			if output, err := exec.Command("systemctl", "enable", "--now", unit).CombinedOutput(); err != nil {
+				fatal(fmt.Errorf("任务状态已保存，但定时器启动失败: %w: %s", err, strings.TrimSpace(string(output))), 1)
+			}
+		} else {
+			_, _ = exec.Command("systemctl", "disable", "--now", unit).CombinedOutput()
+			for _, suffix := range []string{".timer", ".service"} {
+				_ = os.Remove(filepath.Join("/etc/systemd/system", "sbackup-job-"+j.ID+suffix))
+			}
+			_ = exec.Command("systemctl", "daemon-reload").Run()
+		}
+		fmt.Println("任务状态和定时器已更新")
 	case "remove":
 		if len(args) < 2 {
 			fatal(fmt.Errorf("缺少任务 ID"), 2)
@@ -290,13 +323,26 @@ func jobCmd(path string, args []string) {
 		if !hasArg(args[2:], "--force") {
 			fatal(fmt.Errorf("删除任务不会删除仓库快照；如确认请使用 --force"), 8)
 		}
+		removeHistory := hasArg(args[2:], "--delete-history")
 		for i := range c.Jobs {
 			if c.Jobs[i].ID == args[1] {
+				jobID := c.Jobs[i].ID
 				c.Jobs = append(c.Jobs[:i], c.Jobs[i+1:]...)
 				if err := config.Save(path, c); err != nil {
 					fatal(err, 1)
 				}
-				fmt.Println("任务已删除")
+				unit := "sbackup-job-" + jobID + ".timer"
+				_, _ = exec.Command("systemctl", "disable", "--now", unit).CombinedOutput()
+				for _, suffix := range []string{".timer", ".service"} {
+					_ = os.Remove(filepath.Join("/etc/systemd/system", "sbackup-job-"+jobID+suffix))
+				}
+				_ = exec.Command("systemctl", "daemon-reload").Run()
+				if removeHistory {
+					if err := st.DeleteJobRuns(jobID, true, c.Global.LogDir); err != nil {
+						fatal(fmt.Errorf("任务已删除，但清理历史失败: %w", err), 1)
+					}
+				}
+				fmt.Println("任务已删除；Restic 仓库快照未删除")
 				return
 			}
 		}
@@ -543,20 +589,25 @@ func retentionCmd(path string, args []string) {
 
 func logsCmd(path string, args []string) {
 	if len(args) < 1 {
-		fatal(fmt.Errorf("用法: logs list [--job ID] 或 logs show <run-id>"), 2)
+		fatal(fmt.Errorf("用法: logs list [--job ID] [--limit N] 或 logs show <run-id>"), 2)
 	}
 	_, st, _ := svc(path)
 	defer st.Close()
 	if args[0] == "list" {
 		fs := flag.NewFlagSet("logs list", flag.ExitOnError)
 		job := fs.String("job", "", "")
+		limit := fs.Int("limit", 100, "")
 		_ = fs.Parse(args[1:])
-		runs, err := st.RecentRuns(*job, 100)
+		runs, err := st.RecentRuns(*job, *limit)
 		if err != nil {
 			fatal(err, 1)
 		}
 		for _, r := range runs {
-			fmt.Printf("%s\t%s\t%s\t%s\n", r.ID, r.JobID, r.Status, r.LogPath)
+			finished := "-"
+			if !r.FinishedAt.IsZero() {
+				finished = r.FinishedAt.Local().Format(time.RFC3339)
+			}
+			fmt.Printf("%s\t%s\t%s\t%s\t%s\t%s\n", r.ID, r.JobID, r.Status, r.StartedAt.Local().Format(time.RFC3339), finished, r.LogPath)
 		}
 		return
 	}
@@ -571,6 +622,7 @@ func logsCmd(path string, args []string) {
 		if r.ID != args[1] {
 			continue
 		}
+		fmt.Printf("运行: %s\n任务: %s\n状态: %s\n开始: %s\n结束: %s\n耗时: %s\n快照: %s\n错误: %s\n日志: %s\n\n", r.ID, r.JobID, r.Status, r.StartedAt.Local().Format(time.RFC3339), formatOptionalTime(r.FinishedAt), time.Duration(r.DurationMS)*time.Millisecond, r.SnapshotID, r.ErrorSummary, r.LogPath)
 		b, err := os.ReadFile(r.LogPath)
 		if err != nil {
 			fatal(err, 1)
@@ -579,6 +631,13 @@ func logsCmd(path string, args []string) {
 		return
 	}
 	fatal(fmt.Errorf("运行记录不存在: %s", args[1]), 2)
+}
+
+func formatOptionalTime(value time.Time) string {
+	if value.IsZero() {
+		return "-"
+	}
+	return value.Local().Format(time.RFC3339)
 }
 
 func notificationCmd(path string, args []string) {

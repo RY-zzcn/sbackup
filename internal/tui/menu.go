@@ -21,20 +21,32 @@ import (
 	"time"
 )
 
-type RunJobFunc func(context.Context, string, bool) (store.Run, error)
+type RunJobFunc func(context.Context, string, bool, string) (store.Run, error)
 
 func Run(c *config.Config, path string, save func() error, runJob RunJobFunc) error {
+	configureStyle()
 	in := bufio.NewReader(os.Stdin)
 	for {
-		fmt.Println("\nSBackup - 轻量备份")
-		fmt.Println("1. 快速设置备份")
-		fmt.Println("2. 立即运行备份")
-		fmt.Println("3. 查看和恢复备份")
-		fmt.Println("4. 查看状态")
-		fmt.Println("5. 连接监控端")
-		fmt.Println("6. 高级管理")
-		fmt.Println("0. 退出")
-		fmt.Print("请选择: ")
+		printHeader("SBackup 备份管理中心")
+		success, warning, failed, running := recentRunCounts(c)
+		fmt.Printf("  主机: %s    任务: %d    存储: %d\n", styled(ansiBold, c.Global.DisplayName), len(c.Jobs), len(c.Storages))
+		fmt.Printf("  最近 24 小时: %s %d  %s %d  %s %d", styled(ansiGreen, "成功"), success, styled(ansiYellow, "警告"), warning, styled(ansiRed, "失败"), failed)
+		if running > 0 {
+			fmt.Printf("  %s %d", styled(ansiBlue, "运行中"), running)
+		}
+		fmt.Println()
+		fmt.Println(styled(ansiDim, "  ──────────────────────────────────────────────────"))
+		printMenuItem("1", "立即运行备份", "手动选择任务与备份模式")
+		printMenuItem("2", "备份历史与日志", "查看时间、结果、统计和详细日志")
+		printMenuItem("3", "浏览与恢复备份", "安全恢复到独立目录")
+		printMenuItem("4", "任务与计划管理", "详情、编辑、启停、删除")
+		printMenuItem("5", "存储与仓库管理", "连接测试与初始化")
+		printMenuItem("6", "快速创建备份", "新建存储、仓库和任务")
+		printMenuItem("7", "监控端设置", "连接状态监控服务")
+		printMenuItem("8", "系统设置与卸载", "配置校验、诊断和卸载")
+		printMenuItem("0", "退出", "")
+		printHint("可设置 NO_COLOR=1 关闭颜色；直接回车退出当前菜单。")
+		fmt.Print("\n  请选择 › ")
 		line, err := in.ReadString('\n')
 		if err != nil && line == "" {
 			return nil
@@ -42,19 +54,24 @@ func Run(c *config.Config, path string, save func() error, runJob RunJobFunc) er
 		changed := false
 		switch strings.TrimSpace(line) {
 		case "1":
-			quickSetup(c, path, in, save, runJob)
-		case "2":
 			runBackup(c, in, runJob)
+			changed = false
+		case "2":
+			historyMenu(c, in)
 			changed = false
 		case "3":
 			restoreWizard(c, in)
 			changed = false
 		case "4":
-			show(c)
-			changed = false
+			changed = taskMenu(c, path, in, save, runJob)
 		case "5":
-			changed = monitor(c, in)
+			storageMenu(c, in)
+			changed = false
 		case "6":
+			quickSetup(c, path, in, save, runJob)
+		case "7":
+			changed = monitor(c, in)
+		case "8":
 			changed = advancedMenu(c, path, in, save, runJob)
 		case "0", "":
 			return nil
@@ -77,11 +94,11 @@ func selectJob(c *config.Config, in *bufio.Reader) (*config.Job, bool) {
 		fmt.Println("尚未配置备份任务，请先添加任务。")
 		return nil, false
 	}
-	fmt.Println("\n请选择备份任务:")
+	fmt.Println("\n  请选择备份任务:")
 	for i := range c.Jobs {
-		fmt.Printf("%d. %s (%s)\n", i+1, c.Jobs[i].Name, c.Jobs[i].ID)
+		fmt.Printf("  %d  %s %s %s\n", i+1, padDisplay(truncate(c.Jobs[i].Name, 18), 20), padDisplay(modeLabel(c.Jobs[i].Restic.BackupMode), 12), scheduleSummary(c.Jobs[i].Schedule))
 	}
-	fmt.Print("输入编号，直接回车返回: ")
+	fmt.Print("  输入编号，直接回车返回 › ")
 	line, _ := in.ReadString('\n')
 	n, err := strconv.Atoi(strings.TrimSpace(line))
 	if err != nil || n < 1 || n > len(c.Jobs) {
@@ -91,7 +108,7 @@ func selectJob(c *config.Config, in *bufio.Reader) (*config.Job, bool) {
 }
 
 func quickSetup(c *config.Config, configPath string, in *bufio.Reader, save func() error, runJob RunJobFunc) {
-	fmt.Println("\n快速设置会依次完成：存储、加密密码、仓库初始化、备份目录和每天自动备份。")
+	fmt.Println("\n快速设置会依次完成：存储、加密密码、仓库初始化、备份目录、备份模式和自动计划。")
 	fmt.Println("1. 本机或挂载磁盘（最简单）")
 	fmt.Println("2. WebDAV 网盘")
 	fmt.Print("请选择，直接回车返回: ")
@@ -163,7 +180,7 @@ func finishJobSetup(c *config.Config, configPath, storageID string, in *bufio.Re
 		if err := installJobSchedule(job, configPath); err != nil {
 			fmt.Println("任务已保存，但自动定时器安装失败:", err)
 		} else {
-			fmt.Println("每天自动备份已启用。")
+			fmt.Println("自动备份计划已启用:", scheduleSummary(job.Schedule))
 		}
 	}
 	fmt.Print("现在立即执行第一次备份吗？[Y/n]: ")
@@ -266,12 +283,163 @@ func newJob(storageID string, in *bufio.Reader) (config.Job, bool) {
 	if id == "" || len(paths) == 0 {
 		return config.Job{}, false
 	}
-	timeOfDay := ask(in, "每天备份时间（24 小时制）", "02:30")
-	if !validClock(timeOfDay) {
-		fmt.Println("备份时间格式无效，请使用 HH:MM，例如 02:30。")
+	scheduleCfg, ok := askSchedule(in, config.Schedule{Enabled: true, Type: "calendar", Expression: "*-*-* 02:30:00", Persistent: true, RandomizedDelay: "10m", GracePeriod: "45m", Timeout: "6h"})
+	if !ok {
 		return config.Job{}, false
 	}
-	return config.Job{ID: id, Name: name, Enabled: true, StorageID: storageID, Sources: config.Sources{Paths: paths, StrictPaths: true}, Schedule: config.Schedule{Enabled: true, Type: "calendar", Expression: "*-*-* " + timeOfDay + ":00", Persistent: true, RandomizedDelay: "10m", GracePeriod: "45m", Timeout: "6h"}, Retention: config.Retention{KeepLast: 3, KeepDaily: 14, KeepWeekly: 8, KeepMonthly: 12, KeepYearly: 3, ForgetAfterBackup: true, PruneSchedule: "weekly"}, Verification: config.Verification{MetadataAfterBackup: true, StandardSchedule: "weekly"}, Restic: config.Restic{Compression: "auto"}, Monitoring: config.JobMonitoring{Report: true, Heartbeat: true}}, true
+	backupMode := askBackupMode(in, "incremental")
+	return config.Job{ID: id, Name: name, Enabled: true, StorageID: storageID, Sources: config.Sources{Paths: paths, StrictPaths: true}, Schedule: scheduleCfg, Retention: config.Retention{KeepLast: 3, KeepDaily: 14, KeepWeekly: 8, KeepMonthly: 12, KeepYearly: 3, ForgetAfterBackup: true, PruneSchedule: "weekly"}, Verification: config.Verification{MetadataAfterBackup: true, StandardSchedule: "weekly"}, Restic: config.Restic{Compression: "auto", BackupMode: backupMode}, Monitoring: config.JobMonitoring{Report: true, Heartbeat: true}}, true
+}
+
+func askSchedule(in *bufio.Reader, current config.Schedule) (config.Schedule, bool) {
+	fmt.Println("\n自动备份计划:")
+	fmt.Println("  1  每天一个时间点")
+	fmt.Println("  2  每天多个时间点")
+	fmt.Println("  3  固定间隔运行")
+	fmt.Println("  4  暂不启用自动备份")
+	defaultChoice := "1"
+	if !current.Enabled {
+		defaultChoice = "4"
+	} else if current.Type == "interval" {
+		defaultChoice = "3"
+	} else if strings.Contains(current.Expression, ";") {
+		defaultChoice = "2"
+	}
+	fmt.Printf("  请选择 [%s] › ", defaultChoice)
+	choice, _ := in.ReadString('\n')
+	choice = strings.TrimSpace(choice)
+	if choice == "" {
+		choice = defaultChoice
+	}
+	s := current
+	s.Persistent = true
+	if s.RandomizedDelay == "" {
+		s.RandomizedDelay = "10m"
+	}
+	if s.GracePeriod == "" {
+		s.GracePeriod = "45m"
+	}
+	if s.Timeout == "" {
+		s.Timeout = "6h"
+	}
+	s.Enabled = true
+	switch choice {
+	case "1":
+		value := ask(in, "每天备份时间（HH:MM）", firstScheduleClock(current, "02:30"))
+		if !validClock(value) {
+			fmt.Println("备份时间格式无效，请使用 HH:MM，例如 02:30。")
+			return config.Schedule{}, false
+		}
+		s.Type, s.Expression = "calendar", "*-*-* "+value+":00"
+	case "2":
+		value := ask(in, "每天备份时间，多个用逗号分隔", scheduleClocksDefault(current, "02:30,12:30,22:30"))
+		expressions, err := clocksToExpressions(value)
+		if err != nil {
+			fmt.Println(err)
+			return config.Schedule{}, false
+		}
+		s.Type, s.Expression = "calendar", strings.Join(expressions, ";")
+	case "3":
+		value := ask(in, "备份间隔（如 30m、2h、12h）", intervalDefault(current, "6h"))
+		if d, err := time.ParseDuration(value); err != nil || d < time.Minute {
+			fmt.Println("间隔格式无效，最短为 1m，例如 30m、2h、12h。")
+			return config.Schedule{}, false
+		}
+		s.Type, s.Expression = "interval", value
+	case "4":
+		s.Enabled = false
+		if s.Expression == "" {
+			s.Type, s.Expression = "calendar", "*-*-* 02:30:00"
+		}
+	default:
+		fmt.Println("无效选择。")
+		return config.Schedule{}, false
+	}
+	return s, true
+}
+
+func askBackupMode(in *bufio.Reader, current string) string {
+	if current == "" {
+		current = "incremental"
+	}
+	fmt.Println("\n默认备份模式:")
+	fmt.Println("  1  智能增量（推荐，更快；每个快照仍可完整恢复）")
+	fmt.Println("  2  强制全量扫描（重新读取全部文件，数据仍会去重）")
+	defaultChoice := "1"
+	if current == "full" {
+		defaultChoice = "2"
+	}
+	fmt.Printf("  请选择 [%s] › ", defaultChoice)
+	choice, _ := in.ReadString('\n')
+	choice = strings.TrimSpace(choice)
+	if choice == "" {
+		choice = defaultChoice
+	}
+	if choice == "2" {
+		return "full"
+	}
+	return "incremental"
+}
+
+func clocksToExpressions(raw string) ([]string, error) {
+	values := splitValues(raw)
+	if len(values) == 0 {
+		return nil, fmt.Errorf("至少需要一个备份时间。")
+	}
+	expressions := make([]string, 0, len(values))
+	seen := map[string]bool{}
+	for _, value := range values {
+		if !validClock(value) {
+			return nil, fmt.Errorf("时间 %q 无效，请使用 HH:MM。", value)
+		}
+		if !seen[value] {
+			expressions = append(expressions, "*-*-* "+value+":00")
+			seen[value] = true
+		}
+	}
+	return expressions, nil
+}
+
+func firstScheduleClock(s config.Schedule, fallback string) string {
+	if s.Type == "calendar" || s.Type == "" {
+		parts := strings.Fields(strings.Split(s.Expression, ";")[0])
+		if len(parts) > 0 {
+			clock := strings.TrimSuffix(parts[len(parts)-1], ":00")
+			if validClock(clock) {
+				return clock
+			}
+		}
+	}
+	return fallback
+}
+
+func intervalDefault(s config.Schedule, fallback string) string {
+	if s.Type == "interval" && s.Expression != "" {
+		return s.Expression
+	}
+	return fallback
+}
+
+func scheduleClocksDefault(s config.Schedule, fallback string) string {
+	if s.Type != "calendar" && s.Type != "" {
+		return fallback
+	}
+	values := strings.Split(s.Expression, ";")
+	clocks := make([]string, 0, len(values))
+	for _, expression := range values {
+		parts := strings.Fields(expression)
+		if len(parts) == 0 {
+			continue
+		}
+		clock := strings.TrimSuffix(parts[len(parts)-1], ":00")
+		if validClock(clock) {
+			clocks = append(clocks, clock)
+		}
+	}
+	if len(clocks) == 0 {
+		return fallback
+	}
+	return strings.Join(clocks, ",")
 }
 
 func validClock(value string) bool {
@@ -310,13 +478,34 @@ func installJobSchedule(job config.Job, configPath string) error {
 func runBackup(c *config.Config, in *bufio.Reader, runJob RunJobFunc) {
 	job, ok := selectJob(c, in)
 	if ok {
-		runOne(c, job.ID, runJob)
+		fmt.Println("\n本次备份模式:")
+		fmt.Printf("  1  使用任务默认值（%s）\n", modeLabel(job.Restic.BackupMode))
+		fmt.Println("  2  智能增量")
+		fmt.Println("  3  强制全量扫描")
+		fmt.Print("  请选择 [1] › ")
+		choice, _ := in.ReadString('\n')
+		mode := ""
+		switch strings.TrimSpace(choice) {
+		case "", "1":
+		case "2":
+			mode = "incremental"
+		case "3":
+			mode = "full"
+		default:
+			fmt.Println("无效选择。")
+			return
+		}
+		runOneMode(c, job.ID, mode, runJob)
 	}
 }
 
 func runOne(c *config.Config, jobID string, runJob RunJobFunc) {
+	runOneMode(c, jobID, "", runJob)
+}
+
+func runOneMode(c *config.Config, jobID, mode string, runJob RunJobFunc) {
 	if runJob != nil {
-		run, err := runJob(context.Background(), jobID, false)
+		run, err := runJob(context.Background(), jobID, false, mode)
 		if err != nil {
 			fmt.Println("备份失败:", err)
 			return
@@ -330,7 +519,7 @@ func runOne(c *config.Config, jobID string, runJob RunJobFunc) {
 		return
 	}
 	defer st.Close()
-	run, err := (&backup.Service{Config: c, Store: st}).Run(context.Background(), jobID, false)
+	run, err := (&backup.Service{Config: c, Store: st}).RunWithMode(context.Background(), jobID, false, mode)
 	if err != nil {
 		fmt.Println("备份失败:", err)
 		return
@@ -338,36 +527,625 @@ func runOne(c *config.Config, jobID string, runJob RunJobFunc) {
 	fmt.Println("备份完成，快照:", run.SnapshotID)
 }
 
-func advancedMenu(c *config.Config, configPath string, in *bufio.Reader, save func() error, runJob RunJobFunc) bool {
-	fmt.Println("\n高级管理")
-	fmt.Println("1. 管理任务启用状态")
-	fmt.Println("2. 查看存储")
-	fmt.Println("3. 初始化已有仓库")
-	fmt.Println("4. 为已有存储添加备份任务")
-	fmt.Println("5. 校验配置")
-	fmt.Println("0. 返回")
-	fmt.Print("请选择: ")
-	choice, _ := in.ReadString('\n')
-	switch strings.TrimSpace(choice) {
-	case "1":
-		return jobs(c, in)
-	case "2":
-		storages(c, in)
-	case "3":
-		initializeRepository(c, in)
-	case "4":
-		storage, ok := selectStorage(c, in)
-		if ok {
-			finishJobSetup(c, configPath, storage.ID, in, save, runJob)
-		}
-	case "5":
-		if err := c.Validate(); err != nil {
-			fmt.Println("配置错误:", err)
+func taskMenu(c *config.Config, configPath string, in *bufio.Reader, save func() error, runJob RunJobFunc) bool {
+	for {
+		printHeader("任务与计划管理")
+		if len(c.Jobs) == 0 {
+			fmt.Println("  尚未创建任务，可先从主菜单使用“快速创建备份”。")
 		} else {
-			fmt.Println("配置有效")
+			for i, job := range c.Jobs {
+				state := "已禁用"
+				if job.Enabled {
+					state = "已启用"
+				}
+				fmt.Printf("  %d  %s %s %s %s\n", i+1, padDisplay(truncate(job.Name, 18), 20), padDisplay(state, 8), padDisplay(modeLabel(job.Restic.BackupMode), 12), scheduleSummary(job.Schedule))
+			}
+		}
+		fmt.Println()
+		printMenuItem("1", "查看任务完整配置", "来源、排除、计划、保留和存储")
+		printMenuItem("2", "编辑任务计划和模式", "修改频率与增量/全量")
+		printMenuItem("3", "启用 / 禁用任务", "暂停任务不会删除配置和快照")
+		printMenuItem("4", "数据库来源管理", "新增 PostgreSQL / MySQL / SQLite")
+		printMenuItem("5", "为已有存储新建任务", "添加新的备份范围")
+		printMenuItem("6", "重新安装任务定时器", "修复或刷新 systemd timer")
+		printMenuItem("7", "删除某个备份任务", "保留远端仓库快照，可选清理本地历史")
+		printMenuItem("0", "返回主菜单", "")
+		printHint("删除任务只移除本机配置和定时器，不会删除 Restic 仓库中的备份。")
+		fmt.Print("\n  请选择 › ")
+		choice, _ := in.ReadString('\n')
+		switch strings.TrimSpace(choice) {
+		case "1":
+			job, ok := selectJob(c, in)
+			if ok {
+				showJobDetail(c, in, *job)
+			}
+		case "2":
+			job, ok := selectJob(c, in)
+			if ok {
+				editJobMenu(c, configPath, in, save, job)
+			}
+		case "3":
+			if changedJob, changed := jobs(c, in); changed {
+				if err := save(); err != nil {
+					fmt.Println("保存失败:", err)
+				} else {
+					if changedJob.Enabled && changedJob.Schedule.Enabled {
+						if err := installJobSchedule(*changedJob, configPath); err != nil {
+							printWarning("任务已启用，但定时器安装失败: " + err.Error())
+						} else {
+							printSuccess("任务已启用，定时器已启动。")
+						}
+					} else if err := disableJobSchedule(changedJob.ID); err != nil {
+						printWarning("任务已禁用，但定时器清理失败: " + err.Error())
+					} else {
+						printSuccess("任务已禁用，定时器已停止。")
+					}
+				}
+			}
+		case "4":
+			databaseMenu(c, configPath, in, save)
+		case "5":
+			storage, ok := selectStorage(c, in)
+			if ok {
+				finishJobSetup(c, configPath, storage.ID, in, save, runJob)
+			}
+		case "6":
+			job, ok := selectJob(c, in)
+			if ok && job.Schedule.Enabled {
+				if err := installJobSchedule(*job, configPath); err != nil {
+					fmt.Println("安装失败:", err)
+				} else {
+					fmt.Println("定时器已安装并启动。")
+				}
+			}
+		case "7":
+			if deleteJobWizard(c, configPath, in, save) {
+				printSuccess("任务已从本机配置中删除。")
+			}
+		case "0", "":
+			return false
+		default:
+			fmt.Println("无效选择。")
 		}
 	}
-	return false
+}
+
+func editJobMenu(c *config.Config, configPath string, in *bufio.Reader, save func() error, job *config.Job) {
+	for {
+		printHeader("编辑任务 · " + job.Name)
+		fmt.Printf("  当前: %s · %s · %s\n\n", modeLabel(job.Restic.BackupMode), scheduleSummary(job.Schedule), storageDisplayName(c, job.StorageID))
+		printMenuItem("1", "显示名称", job.Name)
+		printMenuItem("2", "备份目录", strings.Join(job.Sources.Paths, ", "))
+		printMenuItem("3", "数据库来源", valueSummary(job.Sources.Databases))
+		printMenuItem("4", "排除规则", valueSummary(job.Excludes))
+		printMenuItem("5", "目标存储", storageDisplayName(c, job.StorageID))
+		printMenuItem("6", "自动计划与备份模式", scheduleSummary(job.Schedule))
+		printMenuItem("7", "保留策略", retentionSummary(job.Retention))
+		printMenuItem("8", "扫描和校验选项", scanOptionSummary(*job))
+		printMenuItem("0", "完成并返回", "")
+		printHint("任务 ID 创建后保持不变，以便关联历史记录和仓库快照。")
+		fmt.Print("\n  请选择 › ")
+		choice, _ := in.ReadString('\n')
+		if strings.TrimSpace(choice) == "0" || strings.TrimSpace(choice) == "" {
+			return
+		}
+		old := *job
+		old.Sources.Paths = append([]string{}, job.Sources.Paths...)
+		old.Sources.Databases = append([]string{}, job.Sources.Databases...)
+		old.Excludes = append([]string{}, job.Excludes...)
+		old.Restic.ExtraTags = append([]string{}, job.Restic.ExtraTags...)
+		old.Notifications.OnSuccess = append([]string{}, job.Notifications.OnSuccess...)
+		old.Notifications.OnWarning = append([]string{}, job.Notifications.OnWarning...)
+		old.Notifications.OnFailure = append([]string{}, job.Notifications.OnFailure...)
+		old.Notifications.OnRecovery = append([]string{}, job.Notifications.OnRecovery...)
+		updateTimer := false
+		switch strings.TrimSpace(choice) {
+		case "1":
+			job.Name = ask(in, "显示名称", job.Name)
+		case "2":
+			values := splitValues(ask(in, "备份目录，多个用逗号分隔", strings.Join(job.Sources.Paths, ",")))
+			if len(values) == 0 {
+				printWarning("至少需要一个目录或数据库来源。")
+				continue
+			}
+			job.Sources.Paths = values
+		case "3":
+			showAvailableDatabases(c)
+			job.Sources.Databases = splitValues(ask(in, "数据库 ID，多个用逗号分隔；输入 - 清空", valueEditDefault(job.Sources.Databases)))
+			if len(job.Sources.Databases) == 1 && job.Sources.Databases[0] == "-" {
+				job.Sources.Databases = nil
+			}
+		case "4":
+			job.Excludes = splitValues(ask(in, "排除规则，多个用逗号分隔；输入 - 清空", valueEditDefault(job.Excludes)))
+			if len(job.Excludes) == 1 && job.Excludes[0] == "-" {
+				job.Excludes = nil
+			}
+		case "5":
+			storage, ok := selectStorage(c, in)
+			if !ok {
+				continue
+			}
+			job.StorageID = storage.ID
+		case "6":
+			scheduleCfg, ok := askSchedule(in, job.Schedule)
+			if !ok {
+				continue
+			}
+			job.Schedule = scheduleCfg
+			job.Restic.BackupMode = askBackupMode(in, job.Restic.BackupMode)
+			updateTimer = true
+		case "7":
+			job.Retention = askRetention(in, job.Retention)
+		case "8":
+			editScanOptions(in, job)
+		default:
+			printWarning("无效选择，请输入菜单编号。")
+			continue
+		}
+		if err := c.Validate(); err != nil {
+			*job = old
+			printFailure("修改无效，已自动回滚: " + err.Error())
+			continue
+		}
+		if err := save(); err != nil {
+			*job = old
+			printFailure("保存失败，已自动回滚: " + err.Error())
+			continue
+		}
+		printSuccess("任务配置已保存。")
+		if updateTimer {
+			if job.Schedule.Enabled && job.Enabled {
+				if err := installJobSchedule(*job, configPath); err != nil {
+					printWarning("配置已保存，但定时器更新失败: " + err.Error())
+				} else {
+					printSuccess("systemd 定时器已同步更新。")
+				}
+			} else if err := disableJobSchedule(job.ID); err != nil {
+				printWarning("配置已保存，但旧定时器清理失败: " + err.Error())
+			}
+		}
+	}
+}
+
+func askRetention(in *bufio.Reader, current config.Retention) config.Retention {
+	fmt.Println("\n  输入非负整数；0 表示不保留该周期。")
+	current.KeepLast = askNonNegativeInt(in, "保留最近快照", current.KeepLast)
+	current.KeepHourly = askNonNegativeInt(in, "每小时保留", current.KeepHourly)
+	current.KeepDaily = askNonNegativeInt(in, "每天保留", current.KeepDaily)
+	current.KeepWeekly = askNonNegativeInt(in, "每周保留", current.KeepWeekly)
+	current.KeepMonthly = askNonNegativeInt(in, "每月保留", current.KeepMonthly)
+	current.KeepYearly = askNonNegativeInt(in, "每年保留", current.KeepYearly)
+	current.ForgetAfterBackup = askYesNo(in, "每次备份后应用保留策略", current.ForgetAfterBackup)
+	return current
+}
+
+func askNonNegativeInt(in *bufio.Reader, label string, current int) int {
+	value := ask(in, label, strconv.Itoa(current))
+	n, err := strconv.Atoi(value)
+	if err != nil || n < 0 {
+		printWarning("输入无效，保留原值。")
+		return current
+	}
+	return n
+}
+
+func askYesNo(in *bufio.Reader, label string, current bool) bool {
+	def := "n"
+	if current {
+		def = "y"
+	}
+	fmt.Printf("%s [y/n, %s]: ", label, def)
+	value, _ := in.ReadString('\n')
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return current
+	}
+	return value == "y" || value == "yes"
+}
+
+func editScanOptions(in *bufio.Reader, job *config.Job) {
+	fmt.Println("\n  扫描与校验选项:")
+	job.Sources.StrictPaths = askYesNo(in, "来源不可读时立即失败", job.Sources.StrictPaths)
+	job.Sources.OneFileSystem = askYesNo(in, "限制在同一文件系统", job.Sources.OneFileSystem)
+	job.Verification.MetadataAfterBackup = askYesNo(in, "备份后执行元数据校验", job.Verification.MetadataAfterBackup)
+	job.Restic.Compression = ask(in, "压缩模式（auto/off/max）", defaultString(job.Restic.Compression, "auto"))
+}
+
+func showAvailableDatabases(c *config.Config) {
+	if len(c.Databases) == 0 {
+		printHint("当前没有配置数据库来源；可输入 - 保持为空。")
+		return
+	}
+	fmt.Println("  可用数据库来源:")
+	for _, database := range c.Databases {
+		fmt.Printf("  - %s  %s (%s)\n", database.ID, database.Name, database.Type)
+	}
+}
+
+func valueSummary(values []string) string {
+	if len(values) == 0 {
+		return "未配置"
+	}
+	if len(values) == 1 {
+		return truncate(values[0], 28)
+	}
+	return fmt.Sprintf("%d 项", len(values))
+}
+
+func valueEditDefault(values []string) string {
+	if len(values) == 0 {
+		return "-"
+	}
+	return strings.Join(values, ",")
+}
+
+func scanOptionSummary(job config.Job) string {
+	parts := []string{}
+	if job.Sources.StrictPaths {
+		parts = append(parts, "严格来源")
+	}
+	if job.Sources.OneFileSystem {
+		parts = append(parts, "单文件系统")
+	}
+	if job.Verification.MetadataAfterBackup {
+		parts = append(parts, "备份后校验")
+	}
+	if len(parts) == 0 {
+		return "默认"
+	}
+	return strings.Join(parts, " / ")
+}
+
+func defaultString(value, fallback string) string {
+	if value == "" {
+		return fallback
+	}
+	return value
+}
+
+func showJobDetail(c *config.Config, in *bufio.Reader, job config.Job) {
+	printHeader("任务完整配置")
+	field("名称", job.Name)
+	field("任务 ID", job.ID)
+	field("状态", map[bool]string{true: styled(ansiGreen, "已启用"), false: styled(ansiYellow, "已禁用")}[job.Enabled])
+	field("存储", storageDisplayName(c, job.StorageID)+" ("+job.StorageID+")")
+	field("备份模式", modeLabel(job.Restic.BackupMode))
+	field("自动计划", scheduleSummary(job.Schedule))
+	field("计划持久化", yesNo(job.Schedule.Persistent))
+	field("随机延迟", emptyLabel(job.Schedule.RandomizedDelay))
+	field("宽限时间", emptyLabel(job.Schedule.GracePeriod))
+	field("任务超时", emptyLabel(job.Schedule.Timeout))
+	field("仅本文件系统", yesNo(job.Sources.OneFileSystem))
+	field("严格检查来源", yesNo(job.Sources.StrictPaths))
+	printValues("备份目录", job.Sources.Paths)
+	printValues("数据库来源", job.Sources.Databases)
+	printValues("排除规则", job.Excludes)
+	field("保留策略", retentionSummary(job.Retention))
+	field("备份后清理", yesNo(job.Retention.ForgetAfterBackup))
+	field("备份后校验", yesNo(job.Verification.MetadataAfterBackup))
+	field("标准校验计划", emptyLabel(job.Verification.StandardSchedule))
+	field("完整校验计划", emptyLabel(job.Verification.FullSchedule))
+	field("完整读取比例", emptyLabel(job.Verification.FullReadDataSubset))
+	field("压缩模式", emptyLabel(job.Restic.Compression))
+	if job.Restic.ReadConcurrency > 0 {
+		field("读取并发", strconv.Itoa(job.Restic.ReadConcurrency))
+	}
+	if len(job.Restic.ExtraTags) > 0 {
+		printValues("额外标签", job.Restic.ExtraTags)
+	}
+	if job.Restic.PackSizeMB > 0 {
+		field("数据包大小", fmt.Sprintf("%d MiB", job.Restic.PackSizeMB))
+	}
+	printValues("成功通知", job.Notifications.OnSuccess)
+	printValues("警告通知", job.Notifications.OnWarning)
+	printValues("失败通知", job.Notifications.OnFailure)
+	printValues("恢复通知", job.Notifications.OnRecovery)
+	field("监控上报", yesNo(job.Monitoring.Report))
+	field("监控心跳", yesNo(job.Monitoring.Heartbeat))
+	pause(in)
+}
+
+func deleteJobWizard(c *config.Config, configPath string, in *bufio.Reader, save func() error) bool {
+	job, ok := selectJob(c, in)
+	if !ok {
+		return false
+	}
+	printHeader("删除备份任务")
+	printWarning("即将删除本机任务配置: " + job.Name + " (" + job.ID + ")")
+	fmt.Println("  将删除: 任务配置、对应 systemd 定时器")
+	fmt.Println("  不会删除: Restic 仓库、仓库快照、仓库密码、存储配置")
+	fmt.Println("\n  本地运行历史和日志:")
+	fmt.Println("  1  保留历史和日志（推荐，之后仍可审计）")
+	fmt.Println("  2  同时删除该任务的本地历史和日志")
+	fmt.Print("  请选择 [1] › ")
+	choice, _ := in.ReadString('\n')
+	removeHistory := strings.TrimSpace(choice) == "2"
+	fmt.Printf("\n  输入任务 ID %s 确认删除 › ", styled(ansiBold+ansiRed, job.ID))
+	confirm, _ := in.ReadString('\n')
+	if strings.TrimSpace(confirm) != job.ID {
+		printWarning("确认内容不匹配，已取消删除。")
+		return false
+	}
+	jobID := job.ID
+	oldJobs := append([]config.Job{}, c.Jobs...)
+	for i := range c.Jobs {
+		if c.Jobs[i].ID == jobID {
+			c.Jobs = append(c.Jobs[:i], c.Jobs[i+1:]...)
+			break
+		}
+	}
+	if err := save(); err != nil {
+		c.Jobs = oldJobs
+		printFailure("保存配置失败: " + err.Error())
+		return false
+	}
+	if err := disableJobSchedule(jobID); err != nil {
+		printWarning("任务已删除，但定时器清理失败: " + err.Error())
+	}
+	if removeHistory {
+		st, err := store.Open(c.Global.StateDB)
+		if err != nil {
+			printWarning("任务已删除，但无法打开状态库清理历史: " + err.Error())
+		} else {
+			if err := st.DeleteJobRuns(jobID, true, c.Global.LogDir); err != nil {
+				printWarning("任务已删除，但清理历史失败: " + err.Error())
+			}
+			_ = st.Close()
+		}
+	}
+	_ = configPath
+	return true
+}
+
+func storageDisplayName(c *config.Config, id string) string {
+	if storage, ok := c.Storage(id); ok {
+		return storage.Name
+	}
+	return "未知存储"
+}
+
+func yesNo(value bool) string {
+	if value {
+		return "是"
+	}
+	return "否"
+}
+
+func printValues(label string, values []string) {
+	if len(values) == 0 {
+		field(label, "-")
+		return
+	}
+	field(label, values[0])
+	for _, value := range values[1:] {
+		fmt.Printf("  %s %s\n", strings.Repeat(" ", 14), value)
+	}
+}
+
+func retentionSummary(r config.Retention) string {
+	parts := []string{}
+	for _, item := range []struct {
+		label string
+		value int
+	}{{"最近", r.KeepLast}, {"每小时", r.KeepHourly}, {"每天", r.KeepDaily}, {"每周", r.KeepWeekly}, {"每月", r.KeepMonthly}, {"每年", r.KeepYearly}} {
+		if item.value > 0 {
+			parts = append(parts, fmt.Sprintf("%s %d", item.label, item.value))
+		}
+	}
+	if r.KeepWithin != "" {
+		parts = append(parts, "期限 "+r.KeepWithin)
+	}
+	return strings.Join(parts, " / ")
+}
+
+func modeLabel(mode string) string {
+	if mode == "full" {
+		return "全量扫描"
+	}
+	return "智能增量"
+}
+
+func disableJobSchedule(jobID string) error {
+	if os.Geteuid() != 0 {
+		return fmt.Errorf("关闭系统定时器需要 sudo")
+	}
+	unit := "sbackup-job-" + jobID + ".timer"
+	if _, err := exec.LookPath("systemctl"); err == nil {
+		output, stopErr := exec.Command("systemctl", "disable", "--now", unit).CombinedOutput()
+		if stopErr != nil && !strings.Contains(string(output), "does not exist") && !strings.Contains(string(output), "not loaded") {
+			return fmt.Errorf("%w: %s", stopErr, strings.TrimSpace(string(output)))
+		}
+	}
+	for _, suffix := range []string{".timer", ".service"} {
+		path := filepath.Join("/etc/systemd/system", "sbackup-job-"+jobID+suffix)
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	if _, err := exec.LookPath("systemctl"); err == nil {
+		return exec.Command("systemctl", "daemon-reload").Run()
+	}
+	return nil
+}
+
+func scheduleSummary(s config.Schedule) string {
+	if !s.Enabled {
+		return "手动运行"
+	}
+	if s.Type == "interval" {
+		return "每隔 " + s.Expression
+	}
+	values := strings.Split(s.Expression, ";")
+	clocks := make([]string, 0, len(values))
+	for _, expression := range values {
+		parts := strings.Fields(expression)
+		if len(parts) > 0 {
+			clocks = append(clocks, strings.TrimSuffix(parts[len(parts)-1], ":00"))
+		}
+	}
+	if len(clocks) > 0 {
+		return "每天 " + strings.Join(clocks, " / ")
+	}
+	return s.Expression
+}
+
+func advancedMenu(c *config.Config, configPath string, in *bufio.Reader, save func() error, runJob RunJobFunc) bool {
+	for {
+		printHeader("系统设置与卸载")
+		printMenuItem("1", "查看运行状态总览", "任务最近结果与计划")
+		printMenuItem("2", "校验当前配置", "检查引用、路径和参数")
+		printMenuItem("3", "运行系统诊断", "调用 sbackup doctor")
+		printMenuItem("4", "查看配置和数据目录", "了解备份与迁移范围")
+		printMenuItem("5", "卸载 SBackup", "保留或清理本机数据")
+		printMenuItem("0", "返回主菜单", "")
+		printHint("卸载不会删除任何本地或远端 Restic 仓库，也不会卸载 Restic/rclone。")
+		fmt.Print("\n  请选择 › ")
+		choice, _ := in.ReadString('\n')
+		switch strings.TrimSpace(choice) {
+		case "1":
+			show(c)
+			pause(in)
+		case "2":
+			if err := c.Validate(); err != nil {
+				printFailure("配置错误: " + err.Error())
+			} else {
+				printSuccess("配置有效。")
+			}
+			pause(in)
+		case "3":
+			runDoctor(in, configPath)
+		case "4":
+			showProjectPaths(c, configPath, in)
+		case "5":
+			uninstallWizard(in)
+		case "0", "":
+			return false
+		default:
+			printWarning("无效选择，请输入菜单编号。")
+		}
+	}
+}
+
+func runDoctor(in *bufio.Reader, configPath string) {
+	bin, err := os.Executable()
+	if err != nil {
+		printFailure("无法定位当前程序: " + err.Error())
+		pause(in)
+		return
+	}
+	fmt.Println("\n  正在运行系统诊断……")
+	cmd := exec.Command(bin, "--config", configPath, "doctor")
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	if err := cmd.Run(); err != nil {
+		printFailure("诊断发现问题或执行失败: " + err.Error())
+	} else {
+		printSuccess("系统诊断通过。")
+	}
+	pause(in)
+}
+
+func showProjectPaths(c *config.Config, configPath string, in *bufio.Reader) {
+	printHeader("配置和数据目录")
+	field("程序", executablePath())
+	field("配置文件", configPath)
+	field("状态数据库", c.Global.StateDB)
+	field("日志目录", c.Global.LogDir)
+	field("临时目录", c.Global.TempDir)
+	field("安装资源", "/usr/local/share/sbackup")
+	printHint("灾难恢复至少要保存配置文件、/etc/sbackup/secrets、rclone.conf 和仓库密码。")
+	pause(in)
+}
+
+func executablePath() string {
+	path, err := os.Executable()
+	if err != nil {
+		return "未知"
+	}
+	return path
+}
+
+func uninstallWizard(in *bufio.Reader) {
+	printHeader("卸载 SBackup")
+	if os.Geteuid() != 0 {
+		printFailure("卸载需要 root 权限，请使用 sudo sbackup。")
+		pause(in)
+		return
+	}
+	script := "/usr/local/share/sbackup/scripts/uninstall.sh"
+	if _, err := os.Stat(script); err != nil {
+		printFailure("未找到卸载脚本: " + script)
+		pause(in)
+		return
+	}
+	fmt.Println("  1  仅卸载程序（保留配置、密钥、历史和日志）")
+	fmt.Println("  2  彻底清理本机项目数据（永久删除配置、密钥、历史和日志）")
+	fmt.Println("  0  取消")
+	printWarning("两种方式都不会删除 Restic 仓库和其中的快照。")
+	fmt.Print("\n  请选择 › ")
+	choice, _ := in.ReadString('\n')
+	choice = strings.TrimSpace(choice)
+	if choice != "1" && choice != "2" {
+		printWarning("已取消卸载。")
+		return
+	}
+	confirmation := "UNINSTALL"
+	args := []string{}
+	if choice == "2" {
+		confirmation = "PURGE SBACKUP"
+		args = append(args, "--purge", "--yes")
+	}
+	fmt.Printf("  输入 %s 确认 › ", styled(ansiBold+ansiRed, confirmation))
+	line, _ := in.ReadString('\n')
+	if strings.TrimSpace(line) != confirmation {
+		printWarning("确认内容不匹配，已取消卸载。")
+		return
+	}
+	cmd := exec.Command(script, args...)
+	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
+	if err := cmd.Run(); err != nil {
+		printFailure("卸载失败: " + err.Error())
+		pause(in)
+		return
+	}
+	printSuccess("卸载完成。当前菜单进程退出后，命令将不可再用。")
+	os.Exit(0)
+}
+
+func storageMenu(c *config.Config, in *bufio.Reader) {
+	for {
+		printHeader("存储与仓库管理")
+		if len(c.Storages) == 0 {
+			fmt.Println("  尚未配置存储，请先使用“快速创建备份”。")
+		} else {
+			for i, storage := range c.Storages {
+				fmt.Printf("  %d  %s %s %s\n", i+1, padDisplay(truncate(storage.Name, 20), 22), padDisplay(storage.Type, 10), storage.ID)
+			}
+		}
+		fmt.Println("\n  1  测试存储连接")
+		fmt.Println("  2  初始化已有仓库")
+		fmt.Println("  0  返回")
+		fmt.Print("\n  请选择 › ")
+		choice, _ := in.ReadString('\n')
+		switch strings.TrimSpace(choice) {
+		case "1":
+			storage, ok := selectStorage(c, in)
+			if !ok {
+				continue
+			}
+			fmt.Println("正在测试存储连接……")
+			if err := repository.Test(context.Background(), c, *storage, nil); err != nil {
+				fmt.Println("连接失败:", err)
+			} else {
+				fmt.Println("存储连接正常。")
+			}
+		case "2":
+			initializeRepository(c, in)
+		case "0", "":
+			return
+		default:
+			fmt.Println("无效选择。")
+		}
+	}
 }
 
 func selectStorage(c *config.Config, in *bufio.Reader) (*config.Storage, bool) {
@@ -376,7 +1154,7 @@ func selectStorage(c *config.Config, in *bufio.Reader) (*config.Storage, bool) {
 		return nil, false
 	}
 	for i := range c.Storages {
-		fmt.Printf("%d. %s (%s)\n", i+1, c.Storages[i].Name, c.Storages[i].ID)
+		fmt.Printf("  %d  %s (%s)\n", i+1, c.Storages[i].Name, c.Storages[i].ID)
 	}
 	fmt.Print("选择存储，直接回车返回: ")
 	line, _ := in.ReadString('\n')
@@ -554,12 +1332,28 @@ func initializeRepository(c *config.Config, in *bufio.Reader) {
 	fmt.Println("仓库初始化完成。")
 }
 func show(c *config.Config) {
-	fmt.Printf("主机: %s\n任务: %d\n存储: %d\n监控: %v\n", c.Global.DisplayName, len(c.Jobs), len(c.Storages), c.Monitoring.Enabled)
+	printHeader("运行状态总览")
+	fmt.Printf("  主机: %s\n  任务: %d\n  存储: %d\n  监控: %s\n", c.Global.DisplayName, len(c.Jobs), len(c.Storages), map[bool]string{true: "已连接", false: "未连接"}[c.Monitoring.Enabled])
+	st, storeErr := store.Open(c.Global.StateDB)
+	if storeErr == nil {
+		defer st.Close()
+	}
 	for _, j := range c.Jobs {
-		fmt.Printf("- %s [%s] %s\n", j.ID, map[bool]string{true: "启用", false: "禁用"}[j.Enabled], j.Name)
+		last := "尚无运行记录"
+		if storeErr == nil {
+			if run, runErr := st.LastRun(j.ID); runErr == nil {
+				when := run.FinishedAt
+				if when.IsZero() {
+					when = run.StartedAt
+				}
+				last = fmt.Sprintf("%s · %s", run.Status, when.Local().Format("01-02 15:04"))
+			}
+		}
+		fmt.Printf("  - %s [%s] %s %s\n", padDisplay(truncate(j.Name, 18), 20), map[bool]string{true: "启用", false: "禁用"}[j.Enabled], padDisplay(modeLabel(j.Restic.BackupMode), 12), scheduleSummary(j.Schedule))
+		fmt.Println("    最近:", last)
 	}
 }
-func jobs(c *config.Config, in *bufio.Reader) bool {
+func jobs(c *config.Config, in *bufio.Reader) (*config.Job, bool) {
 	for i, j := range c.Jobs {
 		fmt.Printf("%d. %s [%v]\n", i+1, j.Name, j.Enabled)
 	}
@@ -568,9 +1362,9 @@ func jobs(c *config.Config, in *bufio.Reader) bool {
 	n, _ := strconv.Atoi(strings.TrimSpace(x))
 	if n > 0 && n <= len(c.Jobs) {
 		c.Jobs[n-1].Enabled = !c.Jobs[n-1].Enabled
-		return true
+		return &c.Jobs[n-1], true
 	}
-	return false
+	return nil, false
 }
 func storages(c *config.Config, in *bufio.Reader) {
 	for _, s := range c.Storages {
