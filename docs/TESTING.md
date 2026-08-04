@@ -4,7 +4,9 @@
 
 ```bash
 GOTOOLCHAIN=local go test -buildvcs=false ./...
+GOTOOLCHAIN=local CGO_ENABLED=1 go test -race -buildvcs=false ./...
 GOTOOLCHAIN=local go vet -buildvcs=false ./...
+shellcheck scripts/*.sh
 bash -n scripts/*.sh
 ```
 
@@ -35,7 +37,7 @@ bash -n scripts/*.sh
 9. 确认 README、配置示例和 CLI 用法一致；
 10. 创建版本 tag 前再次运行 CI 同等命令。
 
-Release tag 会额外构建 amd64、arm64、armv7 静态二进制并发布 SHA256SUMS，同时构建 amd64/arm64 的 GHCR 监控镜像。
+Release tag 会在普通测试之外再次执行 race detector，构建 amd64、arm64、armv7 静态二进制，验证归档结构与版本并发布 SHA256SUMS；同时构建 amd64/arm64 的 GHCR 监控镜像。Release 仅在二进制与容器任务都成功后发布。
 
 ## 外部服务矩阵
 

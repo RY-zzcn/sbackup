@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 )
 
 var remoteNamePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
@@ -34,6 +35,20 @@ func ConfigureWebDAV(rclonePath, configPath, remoteName, endpoint, vendor, usern
 	if vendor == "" {
 		vendor = "other"
 	}
+	dir := filepath.Dir(configPath)
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return err
+	}
+	lockFile, err := os.OpenFile(configPath+".lock", os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return fmt.Errorf("打开 rclone 配置锁: %w", err)
+	}
+	defer lockFile.Close()
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+		return fmt.Errorf("锁定 rclone 配置: %w", err)
+	}
+	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+
 	existing, err := os.ReadFile(configPath)
 	if err != nil && !os.IsNotExist(err) {
 		return err
@@ -52,25 +67,35 @@ func ConfigureWebDAV(rclonePath, configPath, remoteName, endpoint, vendor, usern
 	if err != nil {
 		return fmt.Errorf("处理 WebDAV 密码: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
-	if err := os.MkdirAll(filepath.Dir(configPath), 0700); err != nil {
-		return err
-	}
 	content := strings.TrimRight(string(existing), "\n")
 	if content != "" {
 		content += "\n\n"
 	}
 	content += fmt.Sprintf("[%s]\ntype = webdav\nurl = %s\nvendor = %s\nuser = %s\npass = %s\n", remoteName, endpoint, vendor, username, strings.TrimSpace(string(obscured)))
-	tmp, err := os.CreateTemp(filepath.Dir(configPath), ".rclone-*.conf")
+	if len(existing) > 0 {
+		if err := writeFileAtomic(configPath+".bak", existing, 0600); err != nil {
+			return fmt.Errorf("备份 rclone 配置: %w", err)
+		}
+	}
+	if err := writeFileAtomic(configPath, []byte(content), 0600); err != nil {
+		return fmt.Errorf("保存 rclone 配置: %w", err)
+	}
+	return nil
+}
+
+func writeFileAtomic(path string, content []byte, mode os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".rclone-*.tmp")
 	if err != nil {
 		return err
 	}
 	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath)
-	if err := tmp.Chmod(0600); err != nil {
+	if err := tmp.Chmod(mode); err != nil {
 		tmp.Close()
 		return err
 	}
-	if _, err := tmp.WriteString(content); err != nil {
+	if _, err := tmp.Write(content); err != nil {
 		tmp.Close()
 		return err
 	}
@@ -81,8 +106,13 @@ func ConfigureWebDAV(rclonePath, configPath, remoteName, endpoint, vendor, usern
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if len(existing) > 0 {
-		_ = os.WriteFile(configPath+".bak", existing, 0600)
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
 	}
-	return os.Rename(tmpPath, configPath)
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }

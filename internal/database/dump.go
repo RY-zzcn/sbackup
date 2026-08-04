@@ -1,12 +1,10 @@
 package database
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -96,20 +94,22 @@ func dumpMySQL(ctx context.Context, c *config.Config, d config.Database, dir str
 		args = append(args, "--single-transaction")
 	}
 	args = append(args, d.Database)
-	cmd := exec.CommandContext(ctx, c.Tools.MySQLDumpPath, args...)
 	f, err := os.OpenFile(out, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0600)
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
-	cmd.Stdout = f
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if l != nil {
-		l.Log("info", "database-dump", "执行 mysqldump（凭据已隐藏）")
+	res := executor.RunWithStdout(ctx, l, "database-dump", c.Tools.MySQLDumpPath, args, nil, nil, f)
+	closeErr := f.Close()
+	if res.Err != nil {
+		_ = os.Remove(out)
+		if res.Output != "" {
+			return "", fmt.Errorf("MySQL 导出失败: %s: %w", res.Output, res.Err)
+		}
+		return "", fmt.Errorf("MySQL 导出失败: %w", res.Err)
 	}
-	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("MySQL 导出失败: %s", executor.Redact(stderr.String()))
+	if closeErr != nil {
+		_ = os.Remove(out)
+		return "", fmt.Errorf("关闭 MySQL 导出文件: %w", closeErr)
 	}
 	return out, nil
 }

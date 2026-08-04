@@ -95,7 +95,11 @@ if $source_build; then
   else
     fail "缺少 Go 工具链（源码构建需要 Go 1.23+）"
   fi
-  command -v git >/dev/null 2>&1 && ok "源码工具: git" || fail "缺少源码工具: git"
+  if command -v git >/dev/null 2>&1; then
+    ok "源码工具: git"
+  else
+    fail "缺少源码工具: git"
+  fi
 fi
 
 if command -v systemctl >/dev/null 2>&1; then

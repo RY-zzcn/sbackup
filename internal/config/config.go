@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -242,17 +243,38 @@ func Save(path string, c *Config) error {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(dir, ".config-*.yaml")
+	lockFile, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return err
+	}
+	defer lockFile.Close()
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+		return fmt.Errorf("锁定配置文件: %w", err)
+	}
+	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+	if old, err := os.ReadFile(path); err == nil {
+		if err := writeFileAtomic(path+".bak", old, 0600); err != nil {
+			return fmt.Errorf("备份配置文件: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	return writeFileAtomic(path, b, 0600)
+}
+
+func writeFileAtomic(path string, content []byte, mode os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".config-*.tmp")
 	if err != nil {
 		return err
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
-	if err := tmp.Chmod(0600); err != nil {
+	if err := tmp.Chmod(mode); err != nil {
 		tmp.Close()
 		return err
 	}
-	if _, err := tmp.Write(b); err != nil {
+	if _, err := tmp.Write(content); err != nil {
 		tmp.Close()
 		return err
 	}
@@ -263,10 +285,15 @@ func Save(path string, c *Config) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if old, err := os.ReadFile(path); err == nil {
-		_ = os.WriteFile(path+".bak", old, 0600)
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
 	}
-	return os.Rename(tmpName, path)
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }
 
 var idPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)

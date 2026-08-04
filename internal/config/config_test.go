@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -12,6 +13,38 @@ func validConfig(t *testing.T) Config {
 	c.Storages = []Storage{{ID: "local", Name: "local", Type: "local", RepositoryPath: "/tmp/repo", PasswordFile: "/tmp/repo.pass"}}
 	c.Jobs = []Job{{ID: "job", Name: "job", Enabled: true, StorageID: "local", Sources: Sources{Paths: []string{"/tmp"}}, Retention: Retention{KeepLast: 1}}}
 	return c
+}
+
+func TestSaveCreatesAtomicBackup(t *testing.T) {
+	c := validConfig(t)
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := Save(path, &c); err != nil {
+		t.Fatal(err)
+	}
+	first, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Global.DisplayName = "updated"
+	if err := Save(path, &c); err != nil {
+		t.Fatal(err)
+	}
+	backup, err := os.ReadFile(path + ".bak")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(backup) != string(first) {
+		t.Fatal("backup does not contain the previous configuration")
+	}
+	for _, file := range []string{path, path + ".bak", path + ".lock"} {
+		info, err := os.Stat(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0600 {
+			t.Fatalf("%s mode=%o", filepath.Base(file), info.Mode().Perm())
+		}
+	}
 }
 
 func TestValidateRejectsDuplicateSources(t *testing.T) {

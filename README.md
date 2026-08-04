@@ -74,6 +74,7 @@ Restic 的每个快照都可以独立完整恢复。“智能增量”会复用�
 - [安装与升级](docs/INSTALLATION.md)
 - [配置参考](docs/CONFIGURATION.md)
 - [监控协议](docs/MONITOR-PROTOCOL.md)
+- [版本变更](CHANGELOG.md)
 
 开发检查：`make check`。源码构建：`make build`。
 

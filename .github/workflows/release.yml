@@ -18,7 +18,11 @@ jobs:
           go-version-file: go.mod
           cache: true
       - run: go test -buildvcs=false ./...
+      - run: CGO_ENABLED=1 go test -race -buildvcs=false ./...
       - run: go vet -buildvcs=false ./...
+      - name: Install ShellCheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - run: shellcheck scripts/*.sh
       - run: bash -n scripts/*.sh
 
   binaries:
@@ -57,13 +61,19 @@ jobs:
           CGO_ENABLED=0 go build -trimpath -buildvcs=false -ldflags="-s -w -X main.version=${version}" -o "$out/sbackup" ./cmd/sbackup
           cp LICENSE VERSION "$out/"
           (cd "$out" && tar -czf "../$out.tar.gz" .)
+          test -s "$out.tar.gz"
+          tar -tzf "$out.tar.gz" | grep -qx './sbackup'
+          tar -tzf "$out.tar.gz" | grep -qx './VERSION'
+          if [[ "${{ matrix.asset }}" == linux_amd64 ]]; then
+            test "$("$out/sbackup" version)" = "sbackup ${version}"
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.asset }}
           path: sbackup_*_${{ matrix.asset }}.tar.gz
 
   publish:
-    needs: binaries
+    needs: [binaries, container]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -71,7 +81,9 @@ jobs:
           pattern: release-*
           merge-multiple: true
       - name: Checksums
-        run: sha256sum sbackup_*.tar.gz > SHA256SUMS
+        run: |
+          sha256sum sbackup_*.tar.gz > SHA256SUMS
+          sha256sum --check --strict SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
           files: |

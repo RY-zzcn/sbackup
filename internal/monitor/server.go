@@ -348,7 +348,15 @@ func (s *Server) saveLocked() error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(name, s.cfg.DataFile)
+	if err := os.Rename(name, s.cfg.DataFile); err != nil {
+		return err
+	}
+	dir, err := os.Open(filepath.Dir(s.cfg.DataFile))
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
 
 func mapsClone(in map[string]JobState) map[string]JobState {

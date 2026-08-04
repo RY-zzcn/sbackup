@@ -27,7 +27,9 @@ fi
 if command -v systemctl >/dev/null 2>&1; then
   systemctl disable --now sbackup-maintenance.timer 2>/dev/null || true
   while IFS= read -r unit; do
-    [[ -n $unit ]] && systemctl disable --now "$unit" 2>/dev/null || true
+    if [[ -n $unit ]]; then
+      systemctl disable --now "$unit" 2>/dev/null || true
+    fi
   done < <(systemctl list-unit-files 'sbackup-job-*.timer' --no-legend 2>/dev/null | awk '{print $1}')
 fi
 rm -f /etc/systemd/system/sbackup-maintenance.service /etc/systemd/system/sbackup-maintenance.timer
@@ -37,7 +39,9 @@ for unit in "${job_units[@]}"; do
 done
 rm -f /usr/local/bin/sbackup
 rm -rf /usr/local/share/sbackup
-command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload || true
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl daemon-reload || true
+fi
 
 if $purge; then
   echo "正在永久删除 SBackup 配置、状态和日志。Restic 仓库及系统级 Restic/rclone 不会删除。"

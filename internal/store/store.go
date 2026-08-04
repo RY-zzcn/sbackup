@@ -246,12 +246,20 @@ func (s *Store) CompleteOutbox(id string) error {
 }
 
 func (s *Store) FailOutbox(id, message string, attempts int) error {
-	delay := time.Minute * time.Duration(1<<min(attempts, 8))
-	if delay > 12*time.Hour {
-		delay = 12 * time.Hour
-	}
+	delay := outboxRetryDelay(attempts)
 	_, err := s.DB.Exec(`UPDATE outbox SET attempts=?,next_attempt_at=?,last_error=? WHERE id=?`, attempts, time.Now().Add(delay).UTC().Format(time.RFC3339Nano), message, id)
 	return err
+}
+
+func outboxRetryDelay(attempts int) time.Duration {
+	if attempts < 0 {
+		attempts = 0
+	}
+	delay := time.Minute * time.Duration(1<<min(attempts, 10))
+	if delay > 12*time.Hour {
+		return 12 * time.Hour
+	}
+	return delay
 }
 
 func (s *Store) Prune(maxRuns, maxPending int, eventRetention time.Duration) error {

@@ -69,6 +69,20 @@ type Result struct {
 }
 
 func Run(ctx context.Context, logger *Logger, phase, name string, args []string, env []string, onLine func(string)) Result {
+	return run(ctx, logger, phase, name, args, env, onLine, nil)
+}
+
+// RunWithStdout runs a command with the same cancellation, process-group and
+// logging guarantees as Run, while streaming stdout to the supplied writer.
+// Stderr is still redacted, logged and returned in Result.Output.
+func RunWithStdout(ctx context.Context, logger *Logger, phase, name string, args []string, env []string, onLine func(string), stdout io.Writer) Result {
+	if stdout == nil {
+		return Result{ExitCode: -1, Err: fmt.Errorf("stdout writer 不能为空")}
+	}
+	return run(ctx, logger, phase, name, args, env, onLine, stdout)
+}
+
+func run(ctx context.Context, logger *Logger, phase, name string, args []string, env []string, onLine func(string), stdoutWriter io.Writer) Result {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Env = append(os.Environ(), env...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -85,9 +99,15 @@ func Run(ctx context.Context, logger *Logger, phase, name string, args []string,
 		return nil
 	}
 	cmd.WaitDelay = 5 * time.Second
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return Result{ExitCode: -1, Err: err}
+	var stdout io.Reader
+	if stdoutWriter == nil {
+		var err error
+		stdout, err = cmd.StdoutPipe()
+		if err != nil {
+			return Result{ExitCode: -1, Err: err}
+		}
+	} else {
+		cmd.Stdout = stdoutWriter
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
@@ -102,7 +122,11 @@ func Run(ctx context.Context, logger *Logger, phase, name string, args []string,
 	var lines []string
 	var linesMu sync.Mutex
 	var callbackMu sync.Mutex
-	done := make(chan struct{}, 2)
+	readerCount := 1
+	if stdout != nil {
+		readerCount++
+	}
+	done := make(chan struct{}, readerCount)
 	read := func(r io.Reader, level string) {
 		defer func() { done <- struct{}{} }()
 		s := bufio.NewScanner(r)
@@ -124,10 +148,13 @@ func Run(ctx context.Context, logger *Logger, phase, name string, args []string,
 			}
 		}
 	}
-	go read(stdout, "info")
+	if stdout != nil {
+		go read(stdout, "info")
+	}
 	go read(stderr, "error")
-	<-done
-	<-done
+	for i := 0; i < readerCount; i++ {
+		<-done
+	}
 	err = cmd.Wait()
 	code := 0
 	if err != nil {
@@ -158,6 +185,8 @@ func safeCommand(name string, args []string) string {
 		if redactNext {
 			safe[i] = "<redacted>"
 			redactNext = false
+		} else if strings.HasPrefix(lower, "--defaults-extra-file=") {
+			safe[i] = "--defaults-extra-file=<redacted>"
 		} else if lower == "--password-file" || lower == "--password-command" || lower == "--key-file" {
 			safe[i] = a
 			redactNext = true

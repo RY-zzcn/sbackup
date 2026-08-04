@@ -2,9 +2,9 @@ GO ?= go
 VERSION := $(shell tr -d '[:space:]' < VERSION)
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
-.PHONY: all build monitor test vet check clean
+.PHONY: all build monitor test race vet shellcheck check clean
 
-all: check build
+all: check build monitor
 
 build:
 	mkdir -p bin
@@ -17,10 +17,16 @@ monitor:
 test:
 	GOTOOLCHAIN=local $(GO) test -buildvcs=false ./...
 
+race:
+	GOTOOLCHAIN=local CGO_ENABLED=1 $(GO) test -race -buildvcs=false ./...
+
 vet:
 	GOTOOLCHAIN=local $(GO) vet -buildvcs=false ./...
 
-check: test vet
+shellcheck:
+	shellcheck scripts/*.sh
+
+check: test vet shellcheck
 	bash -n scripts/*.sh
 
 clean:

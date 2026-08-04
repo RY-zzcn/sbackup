@@ -7,6 +7,26 @@ import (
 	"time"
 )
 
+func TestOutboxRetryDelayCapsAtTwelveHours(t *testing.T) {
+	cases := []struct {
+		attempts int
+		want     time.Duration
+	}{
+		{attempts: -1, want: time.Minute},
+		{attempts: 0, want: time.Minute},
+		{attempts: 1, want: 2 * time.Minute},
+		{attempts: 8, want: 256 * time.Minute},
+		{attempts: 9, want: 512 * time.Minute},
+		{attempts: 10, want: 12 * time.Hour},
+		{attempts: 100, want: 12 * time.Hour},
+	}
+	for _, tc := range cases {
+		if got := outboxRetryDelay(tc.attempts); got != tc.want {
+			t.Errorf("attempts=%d: got %s, want %s", tc.attempts, got, tc.want)
+		}
+	}
+}
+
 func TestRunAndOutboxPersistence(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	s, err := Open(path)

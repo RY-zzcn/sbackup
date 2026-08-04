@@ -224,6 +224,10 @@ user = backup-user
 pass = <由 rclone obscure 生成的值>
 ```
 
+`rclone obscure` 只用于避免明文直接出现在配置中，并不等同于加密或密钥保险库。SBackup 将
+`rclone.conf`、其备份文件和并发写锁限制为 `0600`，新建配置目录使用 `0700`；仍应只允许受信任的
+系统管理员访问该目录，不要提交到 Git、同步到公共位置或包含在未加密的诊断包中。
+
 Restic 密码文件：
 
 ```text
